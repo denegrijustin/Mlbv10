@@ -211,59 +211,78 @@ def _grade_from_score(score: float) -> str:
     return 'F'
 
 
-def _statcast_batter_score(avg_ev: float, hard_hit: float, xwoba: float) -> float:
-    ev_component = min(max((avg_ev - 85) / 10, 0), 1) * 40
-    hh_component = min(max(hard_hit / 50, 0), 1) * 30
-    xwoba_component = min(max((xwoba - 0.28) / 0.12, 0), 1) * 30
-    return round(ev_component + hh_component + xwoba_component, 1)
+def _statcast_batter_score(avg_ev: float, hard_hit: float, xwoba: float, whiff_pct: float, contact_quality: float) -> float:
+    """Calculate batter score from multiple metrics."""
+    ev_component = min(max((avg_ev - 85) / 10, 0), 1) * 25
+    hh_component = min(max(hard_hit / 50, 0), 1) * 25
+    whiff_component = max(0, min((100 - whiff_pct) / 100 * 40, 1)) * 15
+    xwoba_component = min(max((xwoba - 0.28) / 0.12, 0), 1) * 20
+    contact_component = min(max(contact_quality / 100, 0), 1) * 15
+    return round(ev_component + hh_component + whiff_component + xwoba_component + contact_component, 1)
 
 
 def build_batter_grades_df(statcast_batter_df: pd.DataFrame) -> pd.DataFrame:
     if statcast_batter_df.empty:
-        return pd.DataFrame(columns=['Batter', 'BIP', 'Avg EV', 'Hard Hit %', 'xwOBA', 'Grade', 'Trend'])
+        return pd.DataFrame(columns=['Batter', 'PA', 'Avg EV', 'Hard Hit %', 'Whiff %', 'xwOBA', 'Grade', 'Trend'])
     df = statcast_batter_df.copy()
     df['Batter'] = _player_name_series(df)
     if 'launch_speed' not in df.columns:
         df['launch_speed'] = 0.0
     if 'estimated_woba_using_speedangle' not in df.columns:
         df['estimated_woba_using_speedangle'] = 0.0
+    if 'description' not in df.columns:
+        df['description'] = ''
 
     contact = df[df['launch_speed'] > 0].copy()
     if contact.empty:
-        return pd.DataFrame(columns=['Batter', 'BIP', 'Avg EV', 'Hard Hit %', 'xwOBA', 'Grade', 'Trend'])
+        return pd.DataFrame(columns=['Batter', 'PA', 'Avg EV', 'Hard Hit %', 'Whiff %', 'xwOBA', 'Grade', 'Trend'])
 
     rows = []
     for batter, grp in contact.groupby('Batter'):
         bip = len(grp)
         avg_ev = grp['launch_speed'].mean()
         hard_hit = (grp['launch_speed'] >= 95).mean() * 100 if bip else 0.0
+        
+        # Calculate whiff rate from swings
+        all_pa = df[df['Batter'] == batter]
+        swings = all_pa['description'].isin(SWING_DESCRIPTIONS).sum()
+        whiffs = all_pa['description'].isin(WHIFF_DESCRIPTIONS).sum()
+        whiff_pct = (whiffs / swings * 100) if swings else 0.0
+        
         xwoba = grp['estimated_woba_using_speedangle'].replace(0, pd.NA).dropna().mean()
         xwoba = 0.0 if pd.isna(xwoba) else float(xwoba)
-        score = _statcast_batter_score(avg_ev, hard_hit, xwoba)
+        
+        # Contact quality: percent of balls hit hard (95+ exit velo)
+        contact_quality = (grp['launch_speed'] >= 95).mean() * 100
+        
+        score = _statcast_batter_score(avg_ev, hard_hit, xwoba, whiff_pct, contact_quality)
         rows.append({
             'Batter': batter,
-            'BIP': bip,
+            'PA': len(all_pa),
             'Avg EV': round(avg_ev, 1),
             'Hard Hit %': round(hard_hit, 1),
+            'Whiff %': round(whiff_pct, 1),
             'xwOBA': round(xwoba, 3),
             'Grade': _grade_from_score(score),
             'Trend': stoplight(score - 70, neutral_band=5),
             'Score': score,
         })
-    out = pd.DataFrame(rows).sort_values(['Score', 'BIP'], ascending=[False, False]).reset_index(drop=True)
-    return out[['Batter', 'BIP', 'Avg EV', 'Hard Hit %', 'xwOBA', 'Grade', 'Trend']]
+    out = pd.DataFrame(rows).sort_values(['Score', 'PA'], ascending=[False, False]).reset_index(drop=True)
+    return out[['Batter', 'PA', 'Avg EV', 'Hard Hit %', 'Whiff %', 'xwOBA', 'Grade', 'Trend']]
 
 
-def _statcast_pitcher_score(avg_spin: float, whiff_pct: float, avg_woba: float) -> float:
-    spin_component = min(max((avg_spin - 2100) / 500, 0), 1) * 35
-    whiff_component = min(max(whiff_pct / 40, 0), 1) * 35
-    contact_component = min(max((0.36 - avg_woba) / 0.12, 0), 1) * 30
-    return round(spin_component + whiff_component + contact_component, 1)
+def _statcast_pitcher_score(avg_spin: float, whiff_pct: float, avg_woba: float, strike_pct: float) -> float:
+    """Calculate pitcher score from multiple metrics."""
+    spin_component = min(max((avg_spin - 2100) / 500, 0), 1) * 30
+    whiff_component = min(max(whiff_pct / 40, 0), 1) * 30
+    woba_component = min(max((0.36 - avg_woba) / 0.12, 0), 1) * 25
+    efficiency_component = min(max(strike_pct / 70, 0), 1) * 15
+    return round(spin_component + whiff_component + woba_component + efficiency_component, 1)
 
 
 def build_pitcher_grades_df(statcast_pitcher_df: pd.DataFrame) -> pd.DataFrame:
     if statcast_pitcher_df.empty:
-        return pd.DataFrame(columns=['Pitcher', 'Pitches', 'Avg Velo', 'Avg Spin', 'Whiff %', 'wOBA Allowed', 'Grade', 'Trend'])
+        return pd.DataFrame(columns=['Pitcher', 'Pitches', 'Avg Velo', 'Avg Spin', 'Whiff %', 'K%', 'wOBA Allowed', 'Grade', 'Trend'])
     df = statcast_pitcher_df.copy()
     df['Pitcher'] = _player_name_series(df)
     for col in ['release_speed', 'release_spin_rate', 'woba_value']:
@@ -271,6 +290,8 @@ def build_pitcher_grades_df(statcast_pitcher_df: pd.DataFrame) -> pd.DataFrame:
             df[col] = 0.0
     if 'description' not in df.columns:
         df['description'] = ''
+    if 'events' not in df.columns:
+        df['events'] = ''
 
     rows = []
     for pitcher, grp in df.groupby('Pitcher'):
@@ -278,22 +299,33 @@ def build_pitcher_grades_df(statcast_pitcher_df: pd.DataFrame) -> pd.DataFrame:
         swings = grp['description'].isin(SWING_DESCRIPTIONS).sum()
         whiffs = grp['description'].isin(WHIFF_DESCRIPTIONS).sum()
         whiff_pct = (whiffs / swings * 100) if swings else 0.0
+        
+        # Strike percentage (estimation from description)
+        strikes = grp['description'].isin({'swinging_strike', 'swinging_strike_blocked', 'called_strike'}).sum()
+        strike_pct = (strikes / pitches * 100) if pitches else 0.0
+        
         avg_woba = grp['woba_value'].replace(0, pd.NA).dropna().mean()
         avg_woba = 0.0 if pd.isna(avg_woba) else float(avg_woba)
-        score = _statcast_pitcher_score(grp['release_spin_rate'].mean(), whiff_pct, avg_woba if avg_woba > 0 else 0.3)
+        
+        # K% estimation (simplified from pitch data)
+        k_events = grp['events'].isin({'strikeout', 'strikeout_double_play'}).sum()
+        k_pct = (k_events / pitches * 100) if pitches else 0.0
+        
+        score = _statcast_pitcher_score(grp['release_spin_rate'].mean(), whiff_pct, avg_woba if avg_woba > 0 else 0.3, strike_pct)
         rows.append({
             'Pitcher': pitcher,
             'Pitches': pitches,
             'Avg Velo': round(grp['release_speed'].mean(), 1),
             'Avg Spin': round(grp['release_spin_rate'].mean(), 0),
             'Whiff %': round(whiff_pct, 1),
+            'K%': round(k_pct, 1),
             'wOBA Allowed': round(avg_woba, 3),
             'Grade': _grade_from_score(score),
             'Trend': stoplight(score - 70, neutral_band=5),
             'Score': score,
         })
     out = pd.DataFrame(rows).sort_values(['Score', 'Pitches'], ascending=[False, False]).reset_index(drop=True)
-    return out[['Pitcher', 'Pitches', 'Avg Velo', 'Avg Spin', 'Whiff %', 'wOBA Allowed', 'Grade', 'Trend']]
+    return out[['Pitcher', 'Pitches', 'Avg Velo', 'Avg Spin', 'Whiff %', 'K%', 'wOBA Allowed', 'Grade', 'Trend']]
 
 
 def build_pitch_mix_df(statcast_pitcher_df: pd.DataFrame) -> pd.DataFrame:
