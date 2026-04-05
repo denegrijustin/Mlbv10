@@ -67,7 +67,8 @@ def render_statcast_scatter(batter_df: pd.DataFrame) -> None:
     if batter_df.empty:
         st.info('Exit velocity data is not available yet.')
         return
-    fig = px.scatter(batter_df, x='Avg EV', y='Hard Hit %', size='BIP', color='Grade', hover_name='Batter', title='Batter Quality of Contact')
+    size_col = 'BIP' if 'BIP' in batter_df.columns else ('PA' if 'PA' in batter_df.columns else None)
+    fig = px.scatter(batter_df, x='Avg EV', y='Hard Hit %', size=size_col, color='Grade', hover_name='Batter', title='Batter Quality of Contact')
     fig.update_layout(height=420, margin=dict(l=20, r=20, t=50, b=20))
     st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
 
