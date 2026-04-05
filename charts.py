@@ -187,3 +187,36 @@ def render_spray_chart(statcast_df: pd.DataFrame, chart_type: str = 'offensive')
     )
     
     st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+
+
+def render_runs_per_inning_chart(rpi_df: pd.DataFrame) -> None:
+    """Render a grouped bar chart of runs for / against per inning with stoplight."""
+    if rpi_df.empty:
+        st.info('No runs-per-inning data available.')
+        return
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=rpi_df['Inning'], y=rpi_df['Runs For'],
+        name='Runs For', marker_color='#2ecc71',
+    ))
+    fig.add_trace(go.Bar(
+        x=rpi_df['Inning'], y=rpi_df['Runs Against'],
+        name='Runs Against', marker_color='#e74c3c',
+    ))
+    for _, row in rpi_df.iterrows():
+        y_top = max(int(row['Runs For']), int(row['Runs Against'])) + 1
+        fig.add_annotation(
+            x=row['Inning'], y=y_top,
+            text=row['Heat'], showarrow=False,
+            font=dict(size=16),
+        )
+    fig.update_layout(
+        barmode='group',
+        title='Runs Per Inning Tracker',
+        xaxis_title='Inning',
+        yaxis_title='Total Runs',
+        height=420,
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())

@@ -573,6 +573,176 @@ def build_pitch_mix_df(statcast_pitcher_df: pd.DataFrame) -> pd.DataFrame:
     return out[['Pitch Type', 'Usage %', 'Avg Velo', 'Avg Spin', 'Whiff %', 'Hit %', 'Success']]
 
 
+def build_opponent_heat_df(
+    upcoming_df: pd.DataFrame,
+    season_df: pd.DataFrame,
+    team_name: str,
+    max_opponents: int = 3,
+) -> pd.DataFrame:
+    """Build next N unique opponents with heat check based on their last 10 games.
+
+    Heat check stoplight:
+    🟢 Hot  = 80 %+ wins in last 10
+    🟡 Warm = 50-79 %
+    🔴 Cold = 0-49 %
+    """
+    cols = ['Date', 'Opponent', 'Location', 'Opp L10 Record', 'Opp L10 Win%', 'Heat']
+    if upcoming_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for _, game in upcoming_df.iterrows():
+        if len(rows) >= max_opponents:
+            break
+        if game.get('away') == team_name:
+            opponent = game.get('home', '-')
+            location = 'Away'
+        else:
+            opponent = game.get('away', '-')
+            location = 'Home'
+
+        if opponent in seen or opponent == '-':
+            continue
+        seen.add(opponent)
+
+        opp_games = _team_games(season_df, opponent)
+        opp_finals = opp_games[opp_games['is_final']].tail(10) if not opp_games.empty else pd.DataFrame()
+
+        if not opp_finals.empty:
+            opp_wins = int((opp_finals['result'] == 'W').sum())
+            opp_total = len(opp_finals)
+            opp_losses = opp_total - opp_wins
+            win_pct = opp_wins / opp_total * 100 if opp_total else 0
+            record = format_record(opp_wins, opp_losses)
+        else:
+            win_pct = 0.0
+            record = '0-0'
+
+        if win_pct >= 80:
+            heat = '🟢 Hot'
+        elif win_pct >= 50:
+            heat = '🟡 Warm'
+        else:
+            heat = '🔴 Cold'
+
+        rows.append({
+            'Date': game.get('officialDate', '-'),
+            'Opponent': opponent,
+            'Location': location,
+            'Opp L10 Record': record,
+            'Opp L10 Win%': f'{win_pct:.0f}%',
+            'Heat': heat,
+        })
+    return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+
+
+def build_runs_per_inning_df(
+    linescore_games: list[dict],
+    team_name: str,
+) -> pd.DataFrame:
+    """Aggregate total runs scored for and against by inning across all completed games."""
+    cols = ['Inning', 'Runs For', 'Runs Against', 'Differential', 'Heat']
+    if not linescore_games:
+        return pd.DataFrame(columns=cols)
+
+    inning_data: dict[int, dict[str, int]] = {}
+    for game in linescore_games:
+        teams_obj = game.get('teams', {})
+        away_team = (teams_obj.get('away') or {}).get('team', {}).get('name', '')
+        home_team = (teams_obj.get('home') or {}).get('team', {}).get('name', '')
+        is_away = away_team == team_name
+
+        innings = (game.get('linescore') or {}).get('innings', [])
+        for inn in innings:
+            num = coerce_int(inn.get('num'), 0)
+            if num <= 0:
+                continue
+            if num not in inning_data:
+                inning_data[num] = {'for': 0, 'against': 0}
+            if is_away:
+                inning_data[num]['for'] += coerce_int((inn.get('away') or {}).get('runs'), 0)
+                inning_data[num]['against'] += coerce_int((inn.get('home') or {}).get('runs'), 0)
+            else:
+                inning_data[num]['for'] += coerce_int((inn.get('home') or {}).get('runs'), 0)
+                inning_data[num]['against'] += coerce_int((inn.get('away') or {}).get('runs'), 0)
+
+    if not inning_data:
+        return pd.DataFrame(columns=cols)
+
+    rows: list[dict] = []
+    for num in sorted(inning_data):
+        d = inning_data[num]
+        diff = d['for'] - d['against']
+        if diff > 0:
+            heat = '🟢'
+        elif diff < 0:
+            heat = '🔴'
+        else:
+            heat = '🟡'
+        rows.append({
+            'Inning': str(num),
+            'Runs For': d['for'],
+            'Runs Against': d['against'],
+            'Differential': diff,
+            'Heat': heat,
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def build_change_since_last_game_df(season_df: pd.DataFrame, team_name: str) -> pd.DataFrame:
+    """Compute metric changes between the last two completed games with stoplight."""
+    cols = ['Metric', 'Last Game', 'Prev Game', 'Change', 'Signal']
+    games = _team_games(season_df, team_name)
+    if games.empty:
+        return pd.DataFrame(columns=cols)
+    finals = games[games['is_final']].copy()
+    if len(finals) < 2:
+        return pd.DataFrame(columns=cols)
+
+    last = finals.iloc[-1]
+    prev = finals.iloc[-2]
+
+    rows: list[dict] = []
+    delta_rs = int(last['team_runs']) - int(prev['team_runs'])
+    rows.append({
+        'Metric': 'Runs Scored',
+        'Last Game': int(last['team_runs']),
+        'Prev Game': int(prev['team_runs']),
+        'Change': signed(delta_rs, 0),
+        'Signal': stoplight(delta_rs, neutral_band=0),
+    })
+
+    delta_ra = int(last['opp_runs']) - int(prev['opp_runs'])
+    rows.append({
+        'Metric': 'Runs Allowed',
+        'Last Game': int(last['opp_runs']),
+        'Prev Game': int(prev['opp_runs']),
+        'Change': signed(delta_ra, 0),
+        'Signal': stoplight(-delta_ra, neutral_band=0),
+    })
+
+    last_diff = int(last['team_runs']) - int(last['opp_runs'])
+    prev_diff = int(prev['team_runs']) - int(prev['opp_runs'])
+    delta_diff = last_diff - prev_diff
+    rows.append({
+        'Metric': 'Run Differential',
+        'Last Game': last_diff,
+        'Prev Game': prev_diff,
+        'Change': signed(delta_diff, 0),
+        'Signal': stoplight(delta_diff, neutral_band=0),
+    })
+
+    rows.append({
+        'Metric': 'Result',
+        'Last Game': last['result'],
+        'Prev Game': prev['result'],
+        'Change': '-',
+        'Signal': '🟢' if last['result'] == 'W' else '🔴',
+    })
+    return pd.DataFrame(rows, columns=cols)
+
+
 def build_statcast_summary_df(statcast_batter_df: pd.DataFrame, statcast_pitcher_df: pd.DataFrame) -> pd.DataFrame:
     batter_contact = statcast_batter_df[statcast_batter_df.get('launch_speed', pd.Series(dtype=float)) > 0].copy() if not statcast_batter_df.empty else pd.DataFrame()
     total_pitcher = len(statcast_pitcher_df)

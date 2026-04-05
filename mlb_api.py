@@ -262,6 +262,50 @@ def fetch_war_df(season: int) -> tuple[pd.DataFrame, str | None]:
         return pd.DataFrame(), str(exc)
 
 
+def build_upcoming_schedule_df(team_id: int, start_date: str, days_ahead: int = 14) -> tuple[pd.DataFrame, str | None]:
+    """Get upcoming scheduled games for a team (not yet Final)."""
+    client = MLBClient()
+    end_dt = (pd.Timestamp(start_date) + pd.Timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+    try:
+        games = client.get_schedule({
+            'sportId': 1,
+            'teamId': team_id,
+            'startDate': start_date,
+            'endDate': end_dt,
+            'gameType': 'R',
+        })
+        df = _games_to_df(games)
+        if not df.empty:
+            future = df[~df['status'].str.contains('Final', case=False, na=False)]
+            return future.reset_index(drop=True), None
+        return df, None
+    except Exception as exc:
+        return _games_to_df([]), str(exc)
+
+
+def build_season_linescore(team_id: int, season: int, end_date: str) -> tuple[list[dict], str | None]:
+    """Get season games with linescore data for runs-per-inning analysis."""
+    client = MLBClient()
+    try:
+        data = client._get('/schedule', {
+            'sportId': 1,
+            'teamId': team_id,
+            'startDate': f'{season}-01-01',
+            'endDate': end_date,
+            'gameType': 'R',
+            'hydrate': 'linescore,team',
+        })
+        games: list[dict] = []
+        for day in data.get('dates', []):
+            for g in day.get('games', []):
+                status = (g.get('status') or {}).get('abstractGameState', '')
+                if 'Final' in status:
+                    games.append(g)
+        return games, None
+    except Exception as exc:
+        return [], str(exc)
+
+
 def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_type: str = 'batter') -> tuple[pd.DataFrame, str | None]:
     team_code = clean_text(team_abbr, '').upper()
     if not team_code:
