@@ -48,6 +48,9 @@ class MLBClient:
     def get_live_feed(self, game_pk: int) -> dict[str, Any]:
         return self._get(f'/game/{game_pk}/feed/live')
 
+    def get_standings(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._get('/standings', params)
+
     def get_statcast(self, params: dict[str, Any]) -> pd.DataFrame:
         response = requests.get(STATCAST_URL, params=params, timeout=self.timeout, headers=HEADERS)
         if not response.ok:
@@ -183,29 +186,59 @@ def get_live_summary(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
     if not game_pk:
         return {}, None
     client = MLBClient()
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            data = client.get_live_feed(game_pk)
+            game_data = data.get('gameData', {})
+            live_data = data.get('liveData', {})
+            linescore = live_data.get('linescore', {})
+            teams = game_data.get('teams', {})
+            away = teams.get('away', {})
+            home = teams.get('home', {})
+            return {
+                'gamePk': game_pk,
+                'away_team': clean_text(away.get('name')),
+                'home_team': clean_text(home.get('name')),
+                'status': clean_text((game_data.get('status') or {}).get('detailedState')),
+                'inning': clean_text(linescore.get('currentInningOrdinal'), '-'),
+                'inning_state': clean_text(linescore.get('inningState'), '-'),
+                'away_runs': coerce_int((linescore.get('teams') or {}).get('away', {}).get('runs'), 0),
+                'home_runs': coerce_int((linescore.get('teams') or {}).get('home', {}).get('runs'), 0),
+                'balls': coerce_int(linescore.get('balls'), 0),
+                'strikes': coerce_int(linescore.get('strikes'), 0),
+                'outs': coerce_int(linescore.get('outs'), 0),
+            }, None
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                return {}, str(exc)
+    return {}, 'Live feed unavailable'
+
+
+def get_wildcard_standings(season: int) -> tuple[pd.DataFrame, str | None]:
+    client = MLBClient()
     try:
-        data = client.get_live_feed(game_pk)
-        game_data = data.get('gameData', {})
-        live_data = data.get('liveData', {})
-        linescore = live_data.get('linescore', {})
-        teams = game_data.get('teams', {})
-        away = teams.get('away', {})
-        home = teams.get('home', {})
-        return {
-            'gamePk': game_pk,
-            'away_team': clean_text(away.get('name')),
-            'home_team': clean_text(home.get('name')),
-            'status': clean_text((game_data.get('status') or {}).get('detailedState')),
-            'inning': clean_text(linescore.get('currentInningOrdinal'), '-'),
-            'inning_state': clean_text(linescore.get('inningState'), '-'),
-            'away_runs': coerce_int((linescore.get('teams') or {}).get('away', {}).get('runs'), 0),
-            'home_runs': coerce_int((linescore.get('teams') or {}).get('home', {}).get('runs'), 0),
-            'balls': coerce_int(linescore.get('balls'), 0),
-            'strikes': coerce_int(linescore.get('strikes'), 0),
-            'outs': coerce_int(linescore.get('outs'), 0),
-        }, None
+        data = client.get_standings({
+            'leagueId': '103,104',
+            'standingsTypes': 'wildCard',
+            'season': season,
+        })
+        rows = []
+        for division_data in data.get('records', []):
+            for team_record in division_data.get('teamRecords', []):
+                team_info = team_record.get('team', {})
+                wc_rank = team_record.get('wildCardRank')
+                rows.append({
+                    'team_id': coerce_int(team_info.get('id'), 0),
+                    'team_name': clean_text(team_info.get('name')),
+                    'wildcard_rank': wc_rank if wc_rank else None,
+                    'wins': coerce_int(team_record.get('wins'), 0),
+                    'losses': coerce_int(team_record.get('losses'), 0),
+                })
+        df = pd.DataFrame(rows)
+        return df, None
     except Exception as exc:
-        return {}, str(exc)
+        return pd.DataFrame(columns=['team_id', 'team_name', 'wildcard_rank', 'wins', 'losses']), str(exc)
 
 
 def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_type: str = 'batter') -> tuple[pd.DataFrame, str | None]:
@@ -235,7 +268,7 @@ def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_
         if df is None or df.empty:
             return pd.DataFrame(), 'Statcast returned no rows for the selected window.'
         out = df.copy()
-        for col in ['launch_speed', 'launch_angle', 'hit_distance_sc', 'release_speed', 'release_spin_rate', 'estimated_woba_using_speedangle', 'woba_value']:
+        for col in ['launch_speed', 'launch_angle', 'hit_distance_sc', 'release_speed', 'release_spin_rate', 'estimated_woba_using_speedangle', 'woba_value', 'hc_x', 'hc_y']:
             if col in out.columns:
                 out[col] = out[col].apply(coerce_float)
         return out, None
