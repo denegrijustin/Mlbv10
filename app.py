@@ -11,6 +11,7 @@ from charts import (
     render_run_diff_chart,
     render_schedule_chart,
     render_statcast_scatter,
+    render_spray_chart,
 )
 from data_helpers import (
     build_batter_grades_df,
@@ -34,6 +35,7 @@ from mlb_api import (
     choose_live_game_pk,
     get_live_summary,
     get_statcast_team_df,
+    get_wildcard_standings,
     load_teams,
 )
 
@@ -63,6 +65,11 @@ def cached_live(game_pk: int | None):
 @st.cache_data(ttl=1800)
 def cached_statcast(team_abbr: str, start_date: str, end_date: str, player_type: str):
     return get_statcast_team_df(team_abbr=team_abbr, start_date=start_date, end_date=end_date, player_type=player_type)
+
+
+@st.cache_data(ttl=3600)
+def cached_wildcard(season: int):
+    return get_wildcard_standings(season)
 
 
 st.title('Live MLB Analytics Dashboard')
@@ -120,6 +127,14 @@ rolling_df = build_team_rolling_df(recent_games_df)
 schedule_table = build_schedule_table(daily_df, selected_team)
 kpi_cards = build_kpi_cards(snapshot, trend_df)
 
+# Wildcard standings
+wc_df, wc_error = cached_wildcard(season)
+wc_rank = None
+if not wc_df.empty and team_row:
+    team_wc = wc_df[wc_df['team_id'] == team_id]
+    if not team_wc.empty:
+        wc_rank = team_wc.iloc[0].get('wildcard_rank')
+
 # Live feed
 live_game_pk = choose_live_game_pk(daily_df)
 live_summary, live_error = cached_live(live_game_pk)
@@ -135,11 +150,16 @@ pitcher_grades_df = build_pitcher_grades_df(statcast_pitcher_df)
 pitch_mix_df = build_pitch_mix_df(statcast_pitcher_df)
 statcast_summary_df = build_statcast_summary_df(statcast_batter_df, statcast_pitcher_df)
 
-cols = st.columns(4)
-for col, item in zip(cols, kpi_cards):
+# Display KPI cards with wildcard rank
+cols = st.columns(5)
+for col, item in zip(cols[:4], kpi_cards):
     col.metric(item['label'], item['value'], item['delta'])
+if wc_rank:
+    cols[4].metric('Wildcard Rank', f"#{wc_rank}")
+elif not wc_df.empty:
+    cols[4].metric('Wildcard Rank', '-', help='Not in wildcard position')
 
-summary_tab, schedule_tab, trends_tab, deep_tab, live_tab = st.tabs(['Summary', 'Schedule', 'Trends', 'Deep Trends', 'Live Feed'])
+summary_tab, schedule_tab, trends_tab, deep_tab, spray_tab, live_tab = st.tabs(['Summary', 'Schedule', 'Trends', 'Deep Trends', 'Spray Charts', 'Live Feed'])
 
 with summary_tab:
     st.subheader('Team Summary')
@@ -214,6 +234,18 @@ with deep_tab:
         else:
             st.dataframe(pitcher_grades_df, use_container_width=True, hide_index=True)
 
+with spray_tab:
+    st.subheader('Spray Charts - Last 21 Days')
+    st.caption('Hit locations showing offensive production and defensive performance.')
+    
+    spray_col1, spray_col2 = st.columns([1, 1])
+    with spray_col1:
+        st.markdown('#### Team Hits (Offensive)')
+        render_spray_chart(statcast_batter_df, chart_type='offensive')
+    with spray_col2:
+        st.markdown('#### Hits Allowed (Defensive)')
+        render_spray_chart(statcast_pitcher_df, chart_type='defensive')
+
 with live_tab:
     st.subheader('Live Feed')
     live_df = build_live_box_df(live_summary)
@@ -223,4 +255,4 @@ with live_tab:
         st.dataframe(live_df, use_container_width=True, hide_index=True)
 
 st.divider()
-st.caption('Version v11: stable flat deployment, restored trend tabs, added player grades, stoplight grading, and optional exit velocity / spin / pitch-mix analytics.')
+st.caption('Version v12: Enhanced player grades with whiff rate & contact quality, wildcard standings integration, spray chart visualization, and improved live feed reliability.')
