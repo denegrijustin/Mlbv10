@@ -205,7 +205,7 @@ def render_runs_per_inning_chart(rpi_df: pd.DataFrame) -> None:
         name='Runs Against', marker_color='#e74c3c',
     ))
     for _, row in rpi_df.iterrows():
-        y_top = max(int(row['Runs For']), int(row['Runs Against'])) + 1
+        y_top = max(int(row['Runs For']), int(row['Runs Against']), 1) + 1
         fig.add_annotation(
             x=row['Inning'], y=y_top,
             text=row['Heat'], showarrow=False,

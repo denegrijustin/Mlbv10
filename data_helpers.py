@@ -37,6 +37,18 @@ WEIGHT_WAR: float = 0.05
 WAR_AVERAGE_STARTER: float = 2.0
 WAR_SCALE_FACTOR: float = 10.0
 WAR_BASELINE_SCORE: float = 50.0
+# Heat-check thresholds (opponent recent-form stoplight on the Schedule tab).
+HEAT_HOT_THRESHOLD: float = 80.0   # 80 %+ wins L10 → 🟢 Hot
+HEAT_WARM_THRESHOLD: float = 50.0  # 50-79 % → 🟡 Warm; below → 🔴 Cold
+
+
+def _diff_emoji(diff: float) -> str:
+    """Return 🟢/🔴/🟡 emoji for a positive/negative/zero differential."""
+    if diff > 0:
+        return '🟢'
+    if diff < 0:
+        return '🔴'
+    return '🟡'
 
 
 def safe_team_row(teams_df: pd.DataFrame, selected_team: str) -> dict[str, Any] | None:
@@ -619,9 +631,9 @@ def build_opponent_heat_df(
             win_pct = 0.0
             record = '0-0'
 
-        if win_pct >= 80:
+        if win_pct >= HEAT_HOT_THRESHOLD:
             heat = '🟢 Hot'
-        elif win_pct >= 50:
+        elif win_pct >= HEAT_WARM_THRESHOLD:
             heat = '🟡 Warm'
         else:
             heat = '🔴 Cold'
@@ -674,18 +686,12 @@ def build_runs_per_inning_df(
     for num in sorted(inning_data):
         d = inning_data[num]
         diff = d['for'] - d['against']
-        if diff > 0:
-            heat = '🟢'
-        elif diff < 0:
-            heat = '🔴'
-        else:
-            heat = '🟡'
         rows.append({
             'Inning': str(num),
             'Runs For': d['for'],
             'Runs Against': d['against'],
             'Differential': diff,
-            'Heat': heat,
+            'Heat': _diff_emoji(diff),
         })
     return pd.DataFrame(rows, columns=cols)
 

@@ -222,7 +222,7 @@ with schedule_tab:
         st.info('No games scheduled for the selected date.')
 
     st.subheader('Next 3 Opponents – Heat Check')
-    st.caption('🟢 Hot (80 %+ wins L10) · 🟡 Warm (50-79 %) · 🔴 Cold (0-49 %)')
+    st.caption('🟢 Hot (80%+ wins L10) · 🟡 Warm (50-79%) · 🔴 Cold (0-49%)')
     if not opponent_heat_df.empty:
         st.dataframe(opponent_heat_df, use_container_width=True, hide_index=True)
     else:
