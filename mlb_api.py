@@ -241,6 +241,27 @@ def get_wildcard_standings(season: int) -> tuple[pd.DataFrame, str | None]:
         return pd.DataFrame(columns=['team_id', 'team_name', 'wildcard_rank', 'wins', 'losses']), str(exc)
 
 
+def fetch_war_df(season: int) -> tuple[pd.DataFrame, str | None]:
+    """Fetch season batting WAR from pybaseball.
+
+    Returns a DataFrame with columns ['Name', 'WAR'] on success, or an empty
+    DataFrame plus an error message string on failure.  The WAR value is used
+    only as a small, bounded stabilising modifier in the hitter grade formula.
+    """
+    try:
+        from pybaseball import batting_stats  # type: ignore
+        df = batting_stats(season, qual=0)
+        if df is None or df.empty:
+            return pd.DataFrame(), 'pybaseball returned no data.'
+        if 'WAR' not in df.columns:
+            return pd.DataFrame(), 'WAR column not found in pybaseball output.'
+        if 'Name' not in df.columns:
+            return pd.DataFrame(), 'Name column not found in pybaseball output.'
+        return df[['Name', 'WAR']].copy(), None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
 def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_type: str = 'batter') -> tuple[pd.DataFrame, str | None]:
     team_code = clean_text(team_abbr, '').upper()
     if not team_code:
