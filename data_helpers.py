@@ -17,6 +17,27 @@ OUT_EVENTS = {
     'sac_fly', 'sac_bunt', 'fielders_choice', 'triple_play', 'sac_fly_double_play',
 }
 
+# ── Hitter grade calibration constants ─────────────────────────────────────────
+# These values were tuned so that league-average Statcast metrics map to the D
+# grade range (70-74) and elite performers reach the A range (90+).
+GRADE_FLOOR_OFFSET: float = 47.0       # score when raw sub-components are all 0
+GRADE_FLOOR_SCALE: float = 0.55        # scale factor applied to raw sub-component sum
+HARD_HIT_CEILING: float = 55.0        # hard-hit% that saturates the component (elite ~57%)
+BARREL_PCT_CEILING: float = 25.0      # barrel% that saturates the component (elite ~22%)
+BARREL_MIN_EV: float = 98.0           # minimum exit velocity for a barrel
+BARREL_BASE_MIN_ANGLE: float = 26.0   # minimum launch angle window at BARREL_MIN_EV
+BARREL_BASE_MAX_ANGLE: float = 30.0   # maximum launch angle window at BARREL_MIN_EV
+# Blend weights (must sum to 1.0)
+WEIGHT_OFFENSE: float = 0.45
+WEIGHT_BASERUNNING: float = 0.15
+WEIGHT_DEFENSE: float = 0.15
+WEIGHT_SEASON_BASELINE: float = 0.20
+WEIGHT_WAR: float = 0.05
+# WAR normalisation: a typical MLB starter (~2 WAR) maps to a neutral 50 on the grade scale.
+WAR_AVERAGE_STARTER: float = 2.0
+WAR_SCALE_FACTOR: float = 10.0
+WAR_BASELINE_SCORE: float = 50.0
+
 
 def safe_team_row(teams_df: pd.DataFrame, selected_team: str) -> dict[str, Any] | None:
     if teams_df.empty or not selected_team:
@@ -227,11 +248,11 @@ def _is_barrel(launch_speed: float, launch_angle: float) -> bool:
     window centred on 26-30 degrees that expands by ~1 degree per additional
     mph of exit velocity.
     """
-    if launch_speed < 98:
+    if launch_speed < BARREL_MIN_EV:
         return False
-    extra = launch_speed - 98
-    min_angle = max(26 - extra, 8)
-    max_angle = min(30 + extra, 50)
+    extra = launch_speed - BARREL_MIN_EV
+    min_angle = max(BARREL_BASE_MIN_ANGLE - extra, 8)
+    max_angle = min(BARREL_BASE_MAX_ANGLE + extra, 50)
     return min_angle <= launch_angle <= max_angle
 
 
@@ -247,21 +268,21 @@ def _offense_score(
     """Compute offense component on a 0-100 scale from available Statcast metrics.
 
     Raw sub-components (sum to 100) are then lifted via a floor transformation
-    so that league-average metrics produce a score in the 70-75 range rather
-    than the raw midpoint of 45-50.
+    so that league-average metrics produce a score in the D grade range (70-74)
+    rather than the raw midpoint of ~45.
 
     Raw components: EV 0-20 | Hard-hit 0-20 | Barrel 0-15 | xwOBA 0-20 | Whiff 0-10 | Walk 0-10 | TB/PA 0-5
     """
     ev_cmp = min(max((avg_ev - 85) / 10, 0), 1) * 20
-    hh_cmp = min(hard_hit_pct / 50, 1) * 20
-    barrel_cmp = min(barrel_pct / 20, 1) * 15
+    hh_cmp = min(hard_hit_pct / HARD_HIT_CEILING, 1) * 20
+    barrel_cmp = min(barrel_pct / BARREL_PCT_CEILING, 1) * 15
     xwoba_cmp = min(max((xwoba - 0.280) / 0.160, 0), 1) * 20
     whiff_cmp = max(0, 1 - whiff_pct / 100) * 10
     walk_cmp = min(walk_pct / 15, 1) * 10
     tb_cmp = min(tb_per_pa / 0.5, 1) * 5
     raw = ev_cmp + hh_cmp + barrel_cmp + xwoba_cmp + whiff_cmp + walk_cmp + tb_cmp
-    # Lift into practical MLB range: raw 0→45, raw 50→72.5 (avg), raw 100→100
-    return round(min(45 + raw * 0.55, 100), 1)
+    # Lift into practical MLB range using calibration constants
+    return round(min(GRADE_FLOOR_OFFSET + raw * GRADE_FLOOR_SCALE, 100), 1)
 
 
 def _baserunning_score(events_series: pd.Series) -> float:
@@ -314,21 +335,22 @@ def _season_baseline_score(
     Raw components (sum to 100): EV 0-30 | Hard-hit 0-30 | Barrel 0-20 | xwOBA 0-20
     """
     ev_cmp = min(max((avg_ev - 85) / 10, 0), 1) * 30
-    hh_cmp = min(hard_hit_pct / 50, 1) * 30
-    barrel_cmp = min(barrel_pct / 20, 1) * 20
+    hh_cmp = min(hard_hit_pct / HARD_HIT_CEILING, 1) * 30
+    barrel_cmp = min(barrel_pct / BARREL_PCT_CEILING, 1) * 20
     xwoba_cmp = min(max((xwoba - 0.280) / 0.160, 0), 1) * 20
     raw = ev_cmp + hh_cmp + barrel_cmp + xwoba_cmp
-    return round(min(45 + raw * 0.55, 100), 1)
+    return round(min(GRADE_FLOOR_OFFSET + raw * GRADE_FLOOR_SCALE, 100), 1)
 
 
 def _war_normalized(war: float) -> float:
-    """Normalise WAR to a 0-100 score for use as a bounded stabilising modifier.
+    """Normalize WAR to a 0-100 score for use as a bounded stabilising modifier.
 
     Scale: WAR -2 → 30, WAR 2 → 50 (average starter), WAR 5 → 80, WAR 8 → 100.
-    WAR is centred so a typical MLB starter (WAR ~2) contributes a neutral 50,
-    keeping it from distorting grades for players whose WAR data is unavailable.
+    WAR is centred at WAR_AVERAGE_STARTER so a typical MLB starter contributes a
+    neutral WAR_BASELINE_SCORE, keeping it from distorting grades for players
+    whose WAR data is unavailable.
     """
-    return round(min(max(50 + (war - 2) * 10, 0), 100), 1)
+    return round(min(max(WAR_BASELINE_SCORE + (war - WAR_AVERAGE_STARTER) * WAR_SCALE_FACTOR, 0), 100), 1)
 
 
 def _hitter_blended_score(
@@ -345,11 +367,11 @@ def _hitter_blended_score(
     """
     war_score = _war_normalized(war)
     raw = (
-        0.45 * offense
-        + 0.15 * baserunning
-        + 0.15 * defense
-        + 0.20 * season_baseline
-        + 0.05 * war_score
+        WEIGHT_OFFENSE * offense
+        + WEIGHT_BASERUNNING * baserunning
+        + WEIGHT_DEFENSE * defense
+        + WEIGHT_SEASON_BASELINE * season_baseline
+        + WEIGHT_WAR * war_score
     )
     return round(min(max(raw, 0), 100), 1)
 
@@ -374,9 +396,9 @@ def build_batter_grades_df(
     for col in ['launch_speed', 'estimated_woba_using_speedangle']:
         if col not in df.columns:
             df[col] = 0.0
-    # Use NaN for missing launch_angle so barrel computation can skip those rows correctly.
+    # Use pd.NA for missing launch_angle so barrel computation can skip those rows correctly.
     if 'launch_angle' not in df.columns:
-        df['launch_angle'] = float('nan')
+        df['launch_angle'] = pd.NA
     for col in ['description', 'events']:
         if col not in df.columns:
             df[col] = ''
@@ -386,12 +408,13 @@ def build_batter_grades_df(
     if contact.empty:
         return pd.DataFrame(columns=empty_cols)
 
-    # Build WAR lookup keyed by lower-cased player name
+    # Build WAR lookup keyed by lower-cased player name (vectorised for performance)
     war_lookup: dict[str, float] = {}
     if war_df is not None and not war_df.empty and 'Name' in war_df.columns and 'WAR' in war_df.columns:
-        for _, row in war_df.iterrows():
-            key = str(row['Name']).lower().strip()
-            war_lookup[key] = coerce_float(row['WAR'], 2.0)
+        war_lookup = {
+            str(name).lower().strip(): coerce_float(val, WAR_AVERAGE_STARTER)
+            for name, val in war_df.set_index('Name')['WAR'].items()
+        }
 
     rows = []
     for batter, grp in contact.groupby('Batter'):
@@ -439,7 +462,7 @@ def build_batter_grades_df(
         baserunning = _baserunning_score(events_s)
         defense = _defense_score()
         season_baseline = _season_baseline_score(avg_ev, hard_hit_pct, barrel_pct, xwoba)
-        war = war_lookup.get(batter.lower().strip(), 2.0)
+        war = war_lookup.get(batter.lower().strip(), WAR_AVERAGE_STARTER)
 
         score = _hitter_blended_score(offense, baserunning, defense, season_baseline, war)
 
