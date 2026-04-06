@@ -59,3 +59,29 @@ def signed(value: float, digits: int = 2) -> str:
 
 def format_record(wins: int, losses: int) -> str:
     return f'{wins}-{losses}'
+
+
+def trend_arrow(delta: float, neutral_band: float = 2.0) -> str:
+    """Return a colored trend arrow based on delta value.
+
+    Green up for positive, yellow flat for near neutral, red down for negative.
+    """
+    if delta > neutral_band:
+        return '🟢 ▲'
+    if delta < -neutral_band:
+        return '🔴 ▼'
+    return '🟡 ▸'
+
+
+def stoplight_pct(win_pct: float) -> str:
+    """Stoplight indicator for opponent last-10 win percentage.
+
+    green if win pct >= 0.600
+    yellow if win pct >= 0.400 and < 0.600
+    red if win pct < 0.400
+    """
+    if win_pct >= 0.600:
+        return '🟢'
+    if win_pct >= 0.400:
+        return '🟡'
+    return '🔴'
