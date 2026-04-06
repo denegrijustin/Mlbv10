@@ -44,9 +44,9 @@ def safe_pct(numerator: float, denominator: float, digits: int = 1) -> float:
 
 def stoplight(delta: float, neutral_band: float = 0.05) -> str:
     if delta > neutral_band:
-        return '🟢 Up'
+        return f'🟢 +{delta:.2f}'
     if delta < -neutral_band:
-        return '🔴 Down'
+        return f'🔴 {delta:.2f}'
     return '🟡 Even'
 
 
