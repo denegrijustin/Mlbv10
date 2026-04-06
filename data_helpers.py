@@ -533,8 +533,11 @@ def compute_hitter_impact(df: pd.DataFrame) -> pd.DataFrame:
         # Barrel %
         if 'barrel' in grp.columns:
             b_vals = pd.to_numeric(grp['barrel'], errors='coerce').fillna(0)
-            contact = pd.to_numeric(grp.get('launch_speed', pd.Series(dtype=float)), errors='coerce').dropna()
-            barrel_pct = float(b_vals.sum() / len(contact) * 100) if len(contact) else None
+            if 'launch_speed' in grp.columns:
+                contact_n = int(pd.to_numeric(grp['launch_speed'], errors='coerce').dropna().size)
+            else:
+                contact_n = len(grp)
+            barrel_pct = float(b_vals.sum() / contact_n * 100) if contact_n else None
         else:
             barrel_pct = None
 
@@ -684,7 +687,10 @@ def compute_pitcher_impact(df: pd.DataFrame, role: str = 'Starter') -> pd.DataFr
 
         if 'barrel' in grp.columns:
             b_vals = pd.to_numeric(grp['barrel'], errors='coerce').fillna(0)
-            bip = len(pd.to_numeric(grp.get('launch_speed', pd.Series(dtype=float)), errors='coerce').dropna())
+            if 'launch_speed' in grp.columns:
+                bip = int(pd.to_numeric(grp['launch_speed'], errors='coerce').dropna().size)
+            else:
+                bip = len(grp)
             barrel_allowed_pct = float(b_vals.sum() / bip * 100) if bip else None
         else:
             barrel_allowed_pct = None
@@ -1005,6 +1011,7 @@ def run_monte_carlo_matchup(
     team_b_snapshot: dict[str, Any],
     n_sims: int = 10_000,
     home_team: str | None = None,
+    seed: int | None = None,
 ) -> dict[str, Any]:
     """
     Poisson-based Monte Carlo simulation for a two-team matchup.
@@ -1067,7 +1074,7 @@ def run_monte_carlo_matchup(
             lambda_b *= 1.04
             inputs_used.append('home_field_b')
 
-    rng = np.random.default_rng(seed=42)
+    rng = np.random.default_rng(seed=seed)
     scores_a = rng.poisson(lambda_a, size=n_sims).astype(float)
     scores_b = rng.poisson(lambda_b, size=n_sims).astype(float)
 
