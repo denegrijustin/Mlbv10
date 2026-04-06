@@ -555,7 +555,10 @@ with tab_compare:
             elif home_choice == f'{team_b_name} Home':
                 home_team = team_b_name
 
-            # Attach team names so run_monte_carlo_matchup can apply home field correctly
+            # run_monte_carlo_matchup resolves the home team by comparing home_team
+            # against snap['team']. get_team_trend_snapshot doesn't include a 'team'
+            # key, so we inject it here to ensure home-field advantage is applied
+            # to the correct team.
             snap_a['team'] = team_a_name
             snap_b['team'] = team_b_name
 
