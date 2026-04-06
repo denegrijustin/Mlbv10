@@ -100,12 +100,15 @@ def render_spray_chart(statcast_df: pd.DataFrame, chart_type: str = 'offensive')
         return
 
     # -- Convert Statcast coordinates to field coordinates --
-    # Statcast hc_x/hc_y: origin top-left of a 250×250 image.
-    # Home plate is empirically located at (125.42, 198.27) in that image
-    # (derived from MLB Gameday SVG overlay dimensions).
-    # We convert so home plate = (0, 0) and +y = toward center field.
+    # Statcast hc_x/hc_y use a 250x250 pixel coordinate system where home
+    # plate sits at approximately (125.42, 198.27).  These values are the
+    # standard Statcast spray-chart origin used across public analyses (see
+    # e.g. baseballsavant.mlb.com spray chart overlay).
+    # We re-centre so home plate = (0, 0) and +y = toward centre field.
     HP_X, HP_Y = 125.42, 198.27
-    # ~2.5 px per foot, derived from the 250 px image spanning ~100 ft
+    # The 250-px image covers roughly 250 ft of field width.  The resulting
+    # scale of 2.5 ft/px maps batted-ball dots to real-world distances that
+    # approximate MLB field dimensions (330 ft down the lines, ~400 ft to CF).
     SCALE = 2.5
 
     df['field_x'] = (df['hc_x'] - HP_X) * SCALE

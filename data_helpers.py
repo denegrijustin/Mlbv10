@@ -698,9 +698,14 @@ def _extract_hitter_game_stats(player_pitches: pd.DataFrame) -> dict:
     stats['strikeouts'] = int(events.isin({'strikeout', 'strikeout_double_play'}).sum())
     stats['sb'] = int(events.isin({'stolen_base_2b', 'stolen_base_3b', 'stolen_base_home'}).sum())
 
-    # Approximate runs and RBI from events (limited in Statcast pitch data)
-    stats['runs'] = stats['home_runs']  # Conservative: only count HR as guaranteed run
-    stats['rbi'] = stats['home_runs']   # Conservative: only count HR as guaranteed RBI
+    # Approximate runs and RBI from events.
+    # NOTE: Statcast pitch-level data does not carry R or RBI columns, so we
+    # use home runs as a conservative lower bound.  Hits, walks, and stolen
+    # bases already contribute to the impact score through their own weights,
+    # so the overall score still rewards run-creation activity even though the
+    # R/RBI component is under-counted.
+    stats['runs'] = stats['home_runs']
+    stats['rbi'] = stats['home_runs']
 
     # Contact quality
     contact = player_pitches[player_pitches.get('launch_speed', pd.Series(dtype=float)) > 0] if 'launch_speed' in player_pitches.columns else pd.DataFrame()
@@ -740,7 +745,12 @@ def _extract_pitcher_game_stats(player_pitches: pd.DataFrame) -> dict:
     }).sum())
     stats['ip'] = round(outs / 3, 1)
 
-    # ER approximation: HR allowed (conservative since Statcast doesn't have ER directly)
+    # ER approximation.
+    # NOTE: Statcast pitch-level data does not include earned runs directly.
+    # We use home runs allowed as a conservative lower bound for ER.  Hits
+    # and walks already carry their own penalties in the formula, so the
+    # overall score still penalises run-allowing activity even though ER is
+    # under-counted.
     stats['er'] = int(events.isin({'home_run'}).sum())
 
     # Whiff rate
