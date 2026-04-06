@@ -588,6 +588,8 @@ def build_pitch_mix_df(statcast_pitcher_df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Player Impact Score ────────────────────────────────────────────────────────
 
+AVERAGE_IMPACT_SCORE = 50  # Baseline for trend_arrow: scores above this trend up
+
 def compute_hitter_impact(player_stats: dict) -> float:
     """Compute a hitter Game Impact Score on a 0-100 scale.
 
@@ -811,7 +813,7 @@ def build_player_impact_table(
                 'Avg EV': round(stats.get('avg_ev', 0), 1),
                 'Hard Hit %': round(stats.get('hard_hit_pct', 0), 1),
                 'WAR': round(war_val, 1),
-                'Trend': trend_arrow(impact - 50),
+                'Trend': trend_arrow(impact - AVERAGE_IMPACT_SCORE),
             })
         else:
             stats = _extract_pitcher_game_stats(grp)
@@ -826,7 +828,7 @@ def build_player_impact_table(
                 'H Allowed': stats.get('h_allowed', 0),
                 'Whiff %': round(stats.get('whiff_rate', 0), 1),
                 'WAR': round(war_val, 1),
-                'Trend': trend_arrow(impact - 50),
+                'Trend': trend_arrow(impact - AVERAGE_IMPACT_SCORE),
             })
 
     if not rows:
