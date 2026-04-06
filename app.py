@@ -7,6 +7,7 @@ from mlb_api import (
     choose_live_game_pk, get_live_summary, get_wildcard_standings,
     get_statcast_team_df, fetch_war_df, build_upcoming_schedule_df,
     build_season_linescore, get_division_standings,
+    get_team_division, get_team_league_id, get_team_logo,
 )
 from data_helpers import (
     safe_team_row, build_team_snapshot, build_summary_df,
@@ -17,6 +18,8 @@ from data_helpers import (
     build_change_since_last_game_df,
     build_division_standings_display, build_wildcard_top5_display,
     build_war_display_df, _player_name_series,
+    build_player_impact_table, compare_teams,
+    get_team_trend_snapshot,
 )
 from charts import (
     render_recent_trend_chart,
@@ -43,7 +46,21 @@ with st.sidebar:
     if teams_err:
         st.warning(teams_err)
 
-    selected_team = st.selectbox('Select team', teams_df['name'].tolist(), index=0)
+    # Default to Kansas City Royals on first load
+    team_names = teams_df['name'].tolist()
+    default_idx = 0
+    if 'Kansas City Royals' in team_names:
+        default_idx = team_names.index('Kansas City Royals')
+
+    if 'selected_team' not in st.session_state:
+        st.session_state['selected_team'] = team_names[default_idx]
+
+    selected_team = st.selectbox(
+        'Select team', team_names,
+        index=team_names.index(st.session_state['selected_team'])
+        if st.session_state['selected_team'] in team_names else default_idx,
+        key='selected_team',
+    )
     selected_date = st.date_input('Schedule date', value=date.today())
     statcast_window = st.slider('Statcast lookback days', min_value=7, max_value=60, value=21, step=7)
 
@@ -178,8 +195,10 @@ if not standings_df.empty and team_id:
     if not team_stand.empty:
         wc_rank = team_stand.iloc[0].get('wildcard_rank', '-')
 
-# Division standings (AL = 103)
-division_standings_df, div_err = _cached_division_standings(season, 103)
+# Division standings (use correct league for selected team)
+team_league_id = get_team_league_id(team_id)
+team_division = get_team_division(team_id)
+division_standings_df, div_err = _cached_division_standings(season, team_league_id)
 
 # WAR display – extract player names from the team's Statcast data
 team_player_names: list[str] = []
@@ -215,8 +234,9 @@ for err_msg in [daily_err, season_err, upcoming_err, linescore_err]:
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 
-summary_tab, trends_tab, deep_tab, spray_tab, live_tab = st.tabs([
-    'Summary', 'Trends & Trackers', 'Deep Trends', 'Spray Charts', 'Live Feed',
+summary_tab, trends_tab, deep_tab, spray_tab, compare_tab, live_tab = st.tabs([
+    'Summary', 'Trends & Trackers', 'Deep Trends', 'Spray Charts',
+    'Team Comparison', 'Live Feed',
 ])
 
 # ---------- Summary ----------------------------------------------------------
@@ -240,11 +260,25 @@ with summary_tab:
         else:
             st.info('Not enough data for trend analysis yet.')
 
-    # AL Central Division Standings
-    st.subheader('AL Central Division Standings')
-    al_central_display = build_division_standings_display(division_standings_df, 'Central')
+    # Division Standings (correct division for selected team)
+    div_short = team_division.split()[-1] if team_division != 'Unknown' else 'Central'
+    div_label = team_division if team_division != 'Unknown' else 'AL Central'
+    st.subheader(f'{div_label} Division Standings')
+    al_central_display = build_division_standings_display(
+        division_standings_df, div_short, highlight_team=team_name,
+    )
     if not al_central_display.empty:
-        st.dataframe(al_central_display, hide_index=True)
+        # Render with logos as images
+        if 'Logo' in al_central_display.columns:
+            st.dataframe(
+                al_central_display,
+                hide_index=True,
+                column_config={
+                    'Logo': st.column_config.ImageColumn('Logo', width='small'),
+                },
+            )
+        else:
+            st.dataframe(al_central_display, hide_index=True)
     else:
         if div_err:
             st.warning(f'Could not load division standings: {div_err}')
@@ -262,11 +296,20 @@ with summary_tab:
         else:
             st.info('Wildcard standings not available yet.')
 
-    # Opponent Heat Check (moved from removed Schedule tab)
+    # Next 3 Opponents with logos and stoplights
     st.subheader('Next 3 Opponents – Heat Check')
-    st.caption('🟢 Hot (80%+ wins L10) · 🟡 Warm (50-79%) · 🔴 Cold (0-49%)')
+    st.caption('🟢 Hot (60%+ wins L10) · 🟡 Warm (40-59%) · 🔴 Cold (<40%)')
     if not opponent_heat_df.empty:
-        st.dataframe(opponent_heat_df, hide_index=True)
+        if 'Logo' in opponent_heat_df.columns:
+            st.dataframe(
+                opponent_heat_df,
+                hide_index=True,
+                column_config={
+                    'Logo': st.column_config.ImageColumn('Logo', width='small'),
+                },
+            )
+        else:
+            st.dataframe(opponent_heat_df, hide_index=True)
     else:
         st.info('No upcoming opponents found in the schedule window.')
 
@@ -304,8 +347,27 @@ with deep_tab:
     st.subheader('Deep Trend Analytics')
     st.caption(f'L10 window: {l10_start} → {l10_end} · Season: {sc_season_start} → {sc_end}')
 
-    # WAR Table (replaces player grades)
-    st.markdown('#### Player WAR')
+    # Player Impact Scores – Hitters
+    st.markdown('#### Hitter Impact Scores')
+    st.caption('Custom impact score (0-100) based on hits, XBH, run creation, contact quality, and strikeout penalty. WAR shown as season context only.')
+    hitter_impact_df = build_player_impact_table(sc_batter_l10, 'batter', war_df)
+    if not hitter_impact_df.empty:
+        st.dataframe(hitter_impact_df, hide_index=True)
+    else:
+        st.info('No hitter impact data available for this window.')
+
+    # Player Impact Scores – Pitchers
+    st.markdown('#### Pitcher Impact Scores')
+    st.caption('Custom impact score (0-100) based on IP, K, whiff rate, and penalty for ER/BB/H. WAR shown as season context only.')
+    pitcher_impact_df = build_player_impact_table(sc_pitcher_l10, 'pitcher', war_df)
+    if not pitcher_impact_df.empty:
+        st.dataframe(pitcher_impact_df, hide_index=True)
+    else:
+        st.info('No pitcher impact data available for this window.')
+
+    # WAR Table (season context)
+    st.markdown('#### Player WAR (Season Context)')
+    st.caption('WAR is a season-level stat and is used only as context, not game-level impact.')
     if not war_display_df.empty:
         st.dataframe(war_display_df, hide_index=True)
     else:
@@ -338,6 +400,66 @@ with spray_tab:
         st.markdown('#### Hits Allowed (Defensive)')
         render_spray_chart(sc_pitcher_l10, 'defensive')
 
+# ---------- Team Comparison ----------------------------------------------------
+
+with compare_tab:
+    st.subheader('Team Comparison')
+    st.caption('Compare two teams across rolling windows of completed games.')
+
+    cmp_left, cmp_right, cmp_window = st.columns([1, 1, 1])
+    with cmp_left:
+        cmp_team_a = st.selectbox(
+            'Team A', team_names,
+            index=team_names.index(selected_team) if selected_team in team_names else default_idx,
+            key='cmp_team_a',
+        )
+    with cmp_right:
+        other_idx = 0 if default_idx != 0 else min(1, len(team_names) - 1)
+        cmp_team_b = st.selectbox(
+            'Team B', team_names,
+            index=other_idx,
+            key='cmp_team_b',
+        )
+    with cmp_window:
+        cmp_games_window = st.selectbox(
+            'Rolling Window (games)',
+            [7, 30, 60, 82, 162],
+            index=1,
+            key='cmp_window',
+        )
+
+    if cmp_team_a and cmp_team_b:
+        comparison_df = compare_teams(season_df, cmp_team_a, cmp_team_b, cmp_games_window)
+        if not comparison_df.empty:
+            st.dataframe(comparison_df, hide_index=True)
+        else:
+            st.info('Not enough data to compare these teams yet.')
+
+        # Multi-window trend view
+        st.markdown('#### Multi-Window Trend Overview')
+        st.caption('Shows both teams across all windows to spot recent hot streaks vs. long-term strength.')
+        windows = [7, 30, 60, 82, 162]
+        trend_rows: list[dict] = []
+        for w in windows:
+            snap_a = get_team_trend_snapshot(season_df, cmp_team_a, w)
+            snap_b = get_team_trend_snapshot(season_df, cmp_team_b, w)
+            trend_rows.append({
+                'Window': f'Last {w}',
+                f'{cmp_team_a} Win%': f"{snap_a.get('win_pct', 0):.3f}" if snap_a else 'N/A',
+                f'{cmp_team_a} R/G': f"{snap_a.get('runs_per_game', 0):.2f}" if snap_a else 'N/A',
+                f'{cmp_team_a} RA/G': f"{snap_a.get('runs_allowed_per_game', 0):.2f}" if snap_a else 'N/A',
+                f'{cmp_team_a} Games': str(snap_a.get('sample_size', 0)) if snap_a else '0',
+                f'{cmp_team_b} Win%': f"{snap_b.get('win_pct', 0):.3f}" if snap_b else 'N/A',
+                f'{cmp_team_b} R/G': f"{snap_b.get('runs_per_game', 0):.2f}" if snap_b else 'N/A',
+                f'{cmp_team_b} RA/G': f"{snap_b.get('runs_allowed_per_game', 0):.2f}" if snap_b else 'N/A',
+                f'{cmp_team_b} Games': str(snap_b.get('sample_size', 0)) if snap_b else '0',
+            })
+        if trend_rows:
+            trend_overview_df = pd.DataFrame(trend_rows)
+            for c in trend_overview_df.columns:
+                trend_overview_df[c] = trend_overview_df[c].astype(str)
+            st.dataframe(trend_overview_df, hide_index=True)
+
 # ---------- Live Feed ---------------------------------------------------------
 
 with live_tab:
@@ -356,7 +478,7 @@ with live_tab:
 
 st.divider()
 st.caption(
-    'Version v23: Real-time data from MLB Stats API and Statcast. '
-    'WAR-based player tracking, AL Central standings, wildcard top 5, '
-    'team logos, +/- trend indicators, runs-per-inning tracker.'
+    'Version v24: Real-time data from MLB Stats API and Statcast. '
+    'Player impact scoring, team comparison, corrected division standings, '
+    'spray chart field view, team logos, and rolling trend analytics.'
 )
