@@ -147,10 +147,15 @@ def _arc_points(distances: list[float], angle_start_deg: float = 45.0,
 
 def _outfield_fence_points(n: int = 120) -> tuple[list[float], list[float]]:
     """
-    Approximate outfield fence: 330ft at foul lines, 400ft at center.
-    Uses r(θ) = 330 + 70*sin(2*(θ-π/4)) for θ in [45°, 135°].
+    Approximate outfield fence using typical MLB dimensions:
+      - 330 ft at the foul-line corners (45° / 135°)
+      - 400 ft at dead center (90°)
+    Formula: r(θ) = 330 + 70*sin(2*(θ-π/4)) for θ in [45°, 135°]
+      330 = corner distance, 70 = (400-330) amplitude, 2*(θ-π/4) maps
+      [45°,135°] → [0°,180°] so sin peaks at 1 exactly at center (90°).
     """
     angles = np.linspace(math.radians(45), math.radians(135), n)
+    # 330 ft corners, 400 ft center field — standard MLB approximation
     radii = 330 + 70 * np.sin(2 * (angles - math.radians(45)))
     xs = (radii * np.cos(angles)).tolist()
     ys = (radii * np.sin(angles)).tolist()
@@ -161,7 +166,7 @@ def _outfield_fence_points(n: int = 120) -> tuple[list[float], list[float]]:
 
 
 def render_spray_chart(statcast_df: pd.DataFrame,
-                       title: str = 'Spray Chart – Last 30 Games') -> None:
+                       title: str = 'Spray Chart - Last 30 Games') -> None:
     """
     Render a 2-D spray chart using centered field coordinates (field_x, field_y).
     Home plate is at (0, 0); positive y points toward center field.
