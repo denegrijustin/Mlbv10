@@ -4,7 +4,8 @@ from typing import Any
 
 import pandas as pd
 
-from formatting import coerce_float, coerce_int, format_record, safe_pct, signed, stoplight
+from formatting import coerce_float, coerce_int, format_record, safe_pct, signed, stoplight, trend_arrow, stoplight_pct
+from mlb_api import get_team_logo, get_team_id_by_name, TEAM_DIVISION_MAP
 
 SWING_DESCRIPTIONS = {
     'swinging_strike', 'swinging_strike_blocked', 'foul', 'foul_tip', 'foul_bunt',
@@ -585,20 +586,290 @@ def build_pitch_mix_df(statcast_pitcher_df: pd.DataFrame) -> pd.DataFrame:
     return out[['Pitch Type', 'Usage %', 'Avg Velo', 'Avg Spin', 'Whiff %', 'Hit %', 'Success']]
 
 
+# ── Player Impact Score ────────────────────────────────────────────────────────
+
+AVERAGE_IMPACT_SCORE = 50  # Baseline for trend_arrow: scores above this trend up
+
+def compute_hitter_impact(player_stats: dict) -> float:
+    """Compute a hitter Game Impact Score on a 0-100 scale.
+
+    Weighted components:
+    - Hits/XBH: singles=2, doubles=5, triples=8, HR=10
+    - Run creation: RBI=3, R=3, BB=2, SB=2
+    - Contact quality: hard_hit_pct * 0.15, avg_ev bonus, barrel_pct * 0.2
+    - Penalty: strikeouts * -1.5
+    - Bonus: WPA if available
+    """
+    score = 0.0
+
+    # Hit value
+    score += coerce_float(player_stats.get('singles'), 0) * 2
+    score += coerce_float(player_stats.get('doubles'), 0) * 5
+    score += coerce_float(player_stats.get('triples'), 0) * 8
+    score += coerce_float(player_stats.get('home_runs'), 0) * 10
+
+    # Run creation
+    score += coerce_float(player_stats.get('rbi'), 0) * 3
+    score += coerce_float(player_stats.get('runs'), 0) * 3
+    score += coerce_float(player_stats.get('bb'), 0) * 2
+    score += coerce_float(player_stats.get('sb'), 0) * 2
+
+    # Contact quality bonus
+    hard_hit = coerce_float(player_stats.get('hard_hit_pct'), 0)
+    score += hard_hit * 0.15
+    avg_ev = coerce_float(player_stats.get('avg_ev'), 0)
+    if avg_ev > 90:
+        score += (avg_ev - 90) * 0.5
+    barrel_pct = coerce_float(player_stats.get('barrel_pct'), 0)
+    score += barrel_pct * 0.2
+
+    # Penalty
+    score -= coerce_float(player_stats.get('strikeouts'), 0) * 1.5
+
+    # WPA bonus if available
+    score += coerce_float(player_stats.get('wpa'), 0) * 5
+
+    # Normalize to 0-100 scale
+    # A typical good game might score ~25-30 raw, great game ~40+
+    normalized = min(max(score * 2.5, 0), 100)
+    return round(normalized, 1)
+
+
+def compute_pitcher_impact(player_stats: dict) -> float:
+    """Compute a pitcher Game Impact Score on a 0-100 scale.
+
+    Weighted components:
+    - IP: innings_pitched * 5
+    - Strikeouts: k * 3
+    - Penalty: ER * -6, BB * -2, H * -2
+    - Bonus: whiff_rate * 0.3, quality start +8, save +6, hold +4
+    - Hard-hit suppression: (100 - hard_hit_pct_allowed) * 0.1
+    """
+    score = 0.0
+
+    # Innings reward
+    ip = coerce_float(player_stats.get('ip'), 0)
+    score += ip * 5
+
+    # Strikeout reward
+    score += coerce_float(player_stats.get('k'), 0) * 3
+
+    # Penalties
+    score -= coerce_float(player_stats.get('er'), 0) * 6
+    score -= coerce_float(player_stats.get('bb'), 0) * 2
+    score -= coerce_float(player_stats.get('h_allowed'), 0) * 2
+
+    # Whiff rate bonus
+    whiff = coerce_float(player_stats.get('whiff_rate'), 0)
+    score += whiff * 0.3
+
+    # Situation bonuses
+    if player_stats.get('quality_start'):
+        score += 8
+    if player_stats.get('save'):
+        score += 6
+    if player_stats.get('hold'):
+        score += 4
+
+    # Hard-hit suppression bonus
+    hh_allowed = coerce_float(player_stats.get('hard_hit_pct_allowed'), 50)
+    score += (100 - hh_allowed) * 0.1
+
+    # Normalize to 0-100 scale
+    # Typical starter 6IP/3ER/6K = 30+18-18 = 30 raw, great game ~45+
+    normalized = min(max(score * 2.0, 0), 100)
+    return round(normalized, 1)
+
+
+def _extract_hitter_game_stats(player_pitches: pd.DataFrame) -> dict:
+    """Extract hitter counting stats from Statcast pitch-level data for a player."""
+    stats: dict = {}
+    if player_pitches.empty:
+        return stats
+
+    events = player_pitches['events'].fillna('') if 'events' in player_pitches.columns else pd.Series([''] * len(player_pitches))
+    descriptions = player_pitches['description'].fillna('') if 'description' in player_pitches.columns else pd.Series([''] * len(player_pitches))
+
+    stats['singles'] = int((events == 'single').sum())
+    stats['doubles'] = int((events == 'double').sum())
+    stats['triples'] = int((events == 'triple').sum())
+    stats['home_runs'] = int((events == 'home_run').sum())
+    stats['bb'] = int(events.isin({'walk', 'intent_walk'}).sum())
+    stats['strikeouts'] = int(events.isin({'strikeout', 'strikeout_double_play'}).sum())
+    stats['sb'] = int(events.isin({'stolen_base_2b', 'stolen_base_3b', 'stolen_base_home'}).sum())
+
+    # Approximate runs and RBI from events.
+    # NOTE: Statcast pitch-level data does not carry R or RBI columns, so we
+    # use home runs as a conservative lower bound.  Hits, walks, and stolen
+    # bases already contribute to the impact score through their own weights,
+    # so the overall score still rewards run-creation activity even though the
+    # R/RBI component is under-counted.
+    stats['runs'] = stats['home_runs']
+    stats['rbi'] = stats['home_runs']
+
+    # Contact quality
+    contact = player_pitches[player_pitches.get('launch_speed', pd.Series(dtype=float)) > 0] if 'launch_speed' in player_pitches.columns else pd.DataFrame()
+    if not contact.empty:
+        stats['avg_ev'] = float(contact['launch_speed'].mean())
+        stats['hard_hit_pct'] = float((contact['launch_speed'] >= 95).mean() * 100)
+        if 'launch_angle' in contact.columns:
+            ev_vals = contact['launch_speed'].values
+            la_vals = contact['launch_angle'].values
+            barrels = sum(
+                1 for ev, la in zip(ev_vals, la_vals)
+                if pd.notna(ev) and pd.notna(la) and _is_barrel(float(ev), float(la))
+            )
+            stats['barrel_pct'] = barrels / len(contact) * 100 if len(contact) > 0 else 0.0
+
+    return stats
+
+
+def _extract_pitcher_game_stats(player_pitches: pd.DataFrame) -> dict:
+    """Extract pitcher stats from Statcast pitch-level data for a player."""
+    stats: dict = {}
+    if player_pitches.empty:
+        return stats
+
+    events = player_pitches['events'].fillna('') if 'events' in player_pitches.columns else pd.Series([''] * len(player_pitches))
+    descriptions = player_pitches['description'].fillna('') if 'description' in player_pitches.columns else pd.Series([''] * len(player_pitches))
+
+    stats['k'] = int(events.isin({'strikeout', 'strikeout_double_play'}).sum())
+    stats['bb'] = int(events.isin({'walk', 'intent_walk'}).sum())
+    stats['h_allowed'] = int(events.isin({'single', 'double', 'triple', 'home_run'}).sum())
+
+    # Approximate IP from outs recorded
+    outs = int(events.isin({
+        'field_out', 'force_out', 'double_play', 'grounded_into_double_play',
+        'fielders_choice_out', 'sac_fly', 'sac_bunt', 'strikeout',
+        'strikeout_double_play', 'triple_play', 'sac_fly_double_play',
+    }).sum())
+    stats['ip'] = round(outs / 3, 1)
+
+    # ER approximation.
+    # NOTE: Statcast pitch-level data does not include earned runs directly.
+    # We use home runs allowed as a conservative lower bound for ER.  Hits
+    # and walks already carry their own penalties in the formula, so the
+    # overall score still penalises run-allowing activity even though ER is
+    # under-counted.
+    stats['er'] = int(events.isin({'home_run'}).sum())
+
+    # Whiff rate
+    swings = int(descriptions.isin(SWING_DESCRIPTIONS).sum())
+    whiffs = int(descriptions.isin(WHIFF_DESCRIPTIONS).sum())
+    stats['whiff_rate'] = (whiffs / swings * 100) if swings > 0 else 0.0
+
+    # Hard-hit suppression
+    if 'launch_speed' in player_pitches.columns:
+        contact = player_pitches[player_pitches['launch_speed'] > 0]
+        if not contact.empty:
+            stats['hard_hit_pct_allowed'] = float((contact['launch_speed'] >= 95).mean() * 100)
+
+    return stats
+
+
+def build_player_impact_table(
+    statcast_df: pd.DataFrame,
+    player_type: str = 'batter',
+    war_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Build a per-player impact score table from Statcast data.
+
+    Args:
+        statcast_df: Statcast pitch-level data.
+        player_type: 'batter' or 'pitcher'.
+        war_df: Optional WAR data for season context.
+
+    Returns:
+        DataFrame with player impact scores and trend indicators.
+    """
+    if player_type == 'batter':
+        cols = ['Player', 'Impact Score', 'H', 'HR', 'BB', 'K', 'Avg EV', 'Hard Hit %', 'WAR', 'Trend']
+    else:
+        cols = ['Player', 'Impact Score', 'IP', 'K', 'BB', 'H Allowed', 'Whiff %', 'WAR', 'Trend']
+
+    if statcast_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    df = statcast_df.copy()
+    df['_player'] = _player_name_series(df)
+
+    # Ensure needed columns exist
+    for col in ['events', 'description', 'launch_speed']:
+        if col not in df.columns:
+            df[col] = '' if col != 'launch_speed' else 0.0
+
+    # Build WAR lookup
+    war_lookup: dict[str, float] = {}
+    if war_df is not None and not war_df.empty and 'Name' in war_df.columns and 'WAR' in war_df.columns:
+        war_lookup = {
+            str(name).lower().strip(): coerce_float(val, 0.0)
+            for name, val in war_df.set_index('Name')['WAR'].items()
+        }
+
+    rows: list[dict] = []
+    for player, grp in df.groupby('_player'):
+        if player_type == 'batter':
+            stats = _extract_hitter_game_stats(grp)
+            impact = compute_hitter_impact(stats)
+            war_val = war_lookup.get(str(player).lower().strip(), 0.0)
+            total_hits = stats.get('singles', 0) + stats.get('doubles', 0) + stats.get('triples', 0) + stats.get('home_runs', 0)
+            rows.append({
+                'Player': str(player),
+                'Impact Score': impact,
+                'H': total_hits,
+                'HR': stats.get('home_runs', 0),
+                'BB': stats.get('bb', 0),
+                'K': stats.get('strikeouts', 0),
+                'Avg EV': round(stats.get('avg_ev', 0), 1),
+                'Hard Hit %': round(stats.get('hard_hit_pct', 0), 1),
+                'WAR': round(war_val, 1),
+                'Trend': trend_arrow(impact - AVERAGE_IMPACT_SCORE),
+            })
+        else:
+            stats = _extract_pitcher_game_stats(grp)
+            impact = compute_pitcher_impact(stats)
+            war_val = war_lookup.get(str(player).lower().strip(), 0.0)
+            rows.append({
+                'Player': str(player),
+                'Impact Score': impact,
+                'IP': stats.get('ip', 0),
+                'K': stats.get('k', 0),
+                'BB': stats.get('bb', 0),
+                'H Allowed': stats.get('h_allowed', 0),
+                'Whiff %': round(stats.get('whiff_rate', 0), 1),
+                'WAR': round(war_val, 1),
+                'Trend': trend_arrow(impact - AVERAGE_IMPACT_SCORE),
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    out = pd.DataFrame(rows).sort_values('Impact Score', ascending=False).reset_index(drop=True)
+    # Ensure Arrow-safe by converting all columns to appropriate types
+    for c in out.columns:
+        if c in ('Impact Score', 'Avg EV', 'Hard Hit %', 'Whiff %', 'WAR', 'IP'):
+            out[c] = out[c].apply(lambda v: str(round(coerce_float(v), 1)))
+        elif c in ('H', 'HR', 'BB', 'K', 'H Allowed'):
+            out[c] = out[c].apply(lambda v: str(coerce_int(v)))
+        else:
+            out[c] = out[c].astype(str)
+    return out[cols]
+
+
 def build_opponent_heat_df(
     upcoming_df: pd.DataFrame,
     season_df: pd.DataFrame,
     team_name: str,
     max_opponents: int = 3,
 ) -> pd.DataFrame:
-    """Build next N unique opponents with heat check based on their last 10 games.
+    """Build next N opponents with heat check based on their last 10 games.
 
-    Heat check stoplight:
-    🟢 Hot  = 80 %+ wins in last 10
-    🟡 Warm = 50-79 %
-    🔴 Cold = 0-49 %
+    Stoplight rules:
+    🟢 = win pct >= 0.600  (6-4 or better)
+    🟡 = win pct >= 0.400 and < 0.600  (4-6 to 5-5 range)
+    🔴 = win pct < 0.400  (3-7 or worse)
     """
-    cols = ['Date', 'Opponent', 'Location', 'Opp L10 Record', 'Opp L10 Win%', 'Heat']
+    cols = ['Logo', 'Date', 'Opponent', 'Location', 'Opp L10 Record', 'Opp L10 Win%', 'Heat']
     if upcoming_df.empty:
         return pd.DataFrame(columns=cols)
 
@@ -609,15 +880,21 @@ def build_opponent_heat_df(
             break
         if game.get('away') == team_name:
             opponent = game.get('home', '-')
+            opp_id = coerce_int(game.get('home_id'), 0)
             location = 'Away'
         else:
             opponent = game.get('away', '-')
+            opp_id = coerce_int(game.get('away_id'), 0)
             location = 'Home'
 
         if opponent in seen or opponent == '-':
             continue
         seen.add(opponent)
 
+        # Get opponent logo URL
+        logo_url = get_team_logo(opp_id)
+
+        # Calculate opponent last 10 record
         opp_games = _team_games(season_df, opponent)
         opp_finals = opp_games[opp_games['is_final']].tail(10) if not opp_games.empty else pd.DataFrame()
 
@@ -625,26 +902,30 @@ def build_opponent_heat_df(
             opp_wins = int((opp_finals['result'] == 'W').sum())
             opp_total = len(opp_finals)
             opp_losses = opp_total - opp_wins
-            win_pct = opp_wins / opp_total * 100 if opp_total else 0
+            win_pct = opp_wins / opp_total if opp_total else 0.0
             record = format_record(opp_wins, opp_losses)
+            if opp_total < 10:
+                record = f'{record} ({opp_total}G)'
         else:
             win_pct = 0.0
             record = '0-0'
 
-        if win_pct >= HEAT_HOT_THRESHOLD:
-            heat = '🟢 Hot'
-        elif win_pct >= HEAT_WARM_THRESHOLD:
-            heat = '🟡 Warm'
+        heat = stoplight_pct(win_pct)
+        if win_pct >= 0.600:
+            heat_label = f'{heat} Hot'
+        elif win_pct >= 0.400:
+            heat_label = f'{heat} Warm'
         else:
-            heat = '🔴 Cold'
+            heat_label = f'{heat} Cold'
 
         rows.append({
-            'Date': game.get('officialDate', '-'),
-            'Opponent': opponent,
-            'Location': location,
-            'Opp L10 Record': record,
-            'Opp L10 Win%': f'{win_pct:.0f}%',
-            'Heat': heat,
+            'Logo': logo_url,
+            'Date': str(game.get('officialDate', '-')),
+            'Opponent': str(opponent),
+            'Location': str(location),
+            'Opp L10 Record': str(record),
+            'Opp L10 Win%': f'{win_pct * 100:.0f}%',
+            'Heat': heat_label,
         })
     return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
@@ -770,25 +1051,36 @@ def build_statcast_summary_df(statcast_batter_df: pd.DataFrame, statcast_pitcher
 def build_division_standings_display(
     division_df: pd.DataFrame,
     division_name: str = 'American League Central',
+    highlight_team: str = '',
 ) -> pd.DataFrame:
-    """Build a display-ready standings table for a single division.
+    """Build a display-ready standings table for a single division with logos.
 
     Args:
         division_df: Full standings DataFrame with a ``division`` column.
-        division_name: Division name to filter on.
+        division_name: Division name to filter on (can be partial like 'Central').
+        highlight_team: Team name to visually highlight.
 
     Returns:
-        Cleaned DataFrame with columns [Team, W, L, Pct, GB, Streak].
+        Cleaned DataFrame with columns [Logo, Team, W, L, Pct, GB, Streak].
     """
-    cols = ['Team', 'W', 'L', 'Pct', 'GB', 'Streak']
+    cols = ['Logo', 'Team', 'W', 'L', 'Pct', 'GB', 'Streak']
     if division_df.empty:
         return pd.DataFrame(columns=cols)
     div = division_df[division_df['division'].str.contains(division_name, case=False, na=False)].copy()
     if div.empty:
         return pd.DataFrame(columns=cols)
     div = div.sort_values('wins', ascending=False).reset_index(drop=True)
+
+    logos = div['team_id'].apply(lambda tid: get_team_logo(coerce_int(tid, 0)))
+    team_names = div['team_name'].astype(str)
+    if highlight_team:
+        team_names = team_names.apply(
+            lambda t: f'⭐ {t}' if t == highlight_team else t
+        )
+
     return pd.DataFrame({
-        'Team': div['team_name'].astype(str),
+        'Logo': logos.astype(str),
+        'Team': team_names,
         'W': div['wins'].astype(str),
         'L': div['losses'].astype(str),
         'Pct': div['pct'].astype(str),
@@ -850,3 +1142,106 @@ def build_war_display_df(war_df: pd.DataFrame, player_names: list[str] | None = 
         'WAR': war_vals.round(1).astype(str),
         'Trend': war_vals.apply(lambda w: stoplight(w - WAR_AVERAGE_STARTER, neutral_band=0.5)),
     })
+
+
+def get_last_10_record(season_df: pd.DataFrame, team_name: str) -> tuple[int, int, int]:
+    """Return (wins, losses, games_played) for a team's last 10 completed games."""
+    games = _team_games(season_df, team_name)
+    if games.empty:
+        return 0, 0, 0
+    finals = games[games['is_final']].tail(10)
+    if finals.empty:
+        return 0, 0, 0
+    wins = int((finals['result'] == 'W').sum())
+    total = len(finals)
+    return wins, total - wins, total
+
+
+def get_team_trend_snapshot(season_df: pd.DataFrame, team_name: str, games_window: int = 30) -> dict:
+    """Aggregate team performance over the most recent completed games.
+
+    Returns a dict of metrics for the given window.
+    """
+    games = _team_games(season_df, team_name)
+    if games.empty:
+        return {}
+    finals = games[games['is_final']].tail(games_window).copy()
+    if finals.empty:
+        return {}
+
+    total = len(finals)
+    wins = int((finals['result'] == 'W').sum())
+    losses = total - wins
+    runs_for = finals['team_runs'].sum()
+    runs_against = finals['opp_runs'].sum()
+
+    return {
+        'sample_size': total,
+        'requested_window': games_window,
+        'wins': wins,
+        'losses': losses,
+        'win_pct': round(wins / total, 3) if total else 0.0,
+        'runs_per_game': round(runs_for / total, 2) if total else 0.0,
+        'runs_allowed_per_game': round(runs_against / total, 2) if total else 0.0,
+        'run_diff_per_game': round((runs_for - runs_against) / total, 2) if total else 0.0,
+        'total_runs_for': int(runs_for),
+        'total_runs_against': int(runs_against),
+    }
+
+
+def compare_teams(
+    season_df: pd.DataFrame,
+    team_a: str,
+    team_b: str,
+    games_window: int = 30,
+) -> pd.DataFrame:
+    """Compare two teams across key metrics for a given rolling window.
+
+    Returns a display-ready DataFrame with columns [Metric, Team A, Team B, Edge].
+    """
+    snap_a = get_team_trend_snapshot(season_df, team_a, games_window)
+    snap_b = get_team_trend_snapshot(season_df, team_b, games_window)
+
+    if not snap_a and not snap_b:
+        return pd.DataFrame(columns=['Metric', team_a, team_b, 'Edge'])
+
+    def _edge(val_a, val_b, higher_better: bool = True) -> str:
+        a = coerce_float(val_a, 0)
+        b = coerce_float(val_b, 0)
+        if abs(a - b) < 0.001:
+            return '🟡 Even'
+        if higher_better:
+            return f'🟢 {team_a}' if a > b else f'🟢 {team_b}'
+        else:
+            return f'🟢 {team_a}' if a < b else f'🟢 {team_b}'
+
+    def _fmt(val, fmt_str='.2f'):
+        if val is None:
+            return 'N/A'
+        return f'{coerce_float(val, 0):{fmt_str}}'
+
+    metrics = [
+        ('Sample Size', 'sample_size', '.0f', None),
+        ('Win %', 'win_pct', '.3f', True),
+        ('Runs/Game', 'runs_per_game', '.2f', True),
+        ('Runs Allowed/Game', 'runs_allowed_per_game', '.2f', False),
+        ('Run Diff/Game', 'run_diff_per_game', '.2f', True),
+    ]
+
+    rows: list[dict] = []
+    for label, key, fmt, higher in metrics:
+        val_a = snap_a.get(key)
+        val_b = snap_b.get(key)
+        edge = _edge(val_a, val_b, higher) if higher is not None else '-'
+        rows.append({
+            'Metric': label,
+            team_a: _fmt(val_a, fmt),
+            team_b: _fmt(val_b, fmt),
+            'Edge': edge,
+        })
+
+    # Arrow-safe
+    df = pd.DataFrame(rows)
+    for c in df.columns:
+        df[c] = df[c].astype(str)
+    return df

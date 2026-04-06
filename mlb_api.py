@@ -98,6 +98,67 @@ FALLBACK_TEAMS = [
     {'id': 158, 'name': 'Milwaukee Brewers', 'abbreviation': 'MIL', 'division': 'NL Central'},
 ]
 
+# Comprehensive team-to-division mapping
+TEAM_DIVISION_MAP: dict[int, dict[str, Any]] = {
+    108: {'name': 'Los Angeles Angels', 'abbr': 'LAA', 'division': 'AL West', 'league_id': 103},
+    109: {'name': 'Arizona Diamondbacks', 'abbr': 'ARI', 'division': 'NL West', 'league_id': 104},
+    110: {'name': 'Baltimore Orioles', 'abbr': 'BAL', 'division': 'AL East', 'league_id': 103},
+    111: {'name': 'Boston Red Sox', 'abbr': 'BOS', 'division': 'AL East', 'league_id': 103},
+    112: {'name': 'Chicago Cubs', 'abbr': 'CHC', 'division': 'NL Central', 'league_id': 104},
+    113: {'name': 'Cincinnati Reds', 'abbr': 'CIN', 'division': 'NL Central', 'league_id': 104},
+    114: {'name': 'Cleveland Guardians', 'abbr': 'CLE', 'division': 'AL Central', 'league_id': 103},
+    115: {'name': 'Colorado Rockies', 'abbr': 'COL', 'division': 'NL West', 'league_id': 104},
+    116: {'name': 'Detroit Tigers', 'abbr': 'DET', 'division': 'AL Central', 'league_id': 103},
+    117: {'name': 'Houston Astros', 'abbr': 'HOU', 'division': 'AL West', 'league_id': 103},
+    118: {'name': 'Kansas City Royals', 'abbr': 'KC', 'division': 'AL Central', 'league_id': 103},
+    119: {'name': 'Los Angeles Dodgers', 'abbr': 'LAD', 'division': 'NL West', 'league_id': 104},
+    120: {'name': 'Washington Nationals', 'abbr': 'WSH', 'division': 'NL East', 'league_id': 104},
+    121: {'name': 'New York Mets', 'abbr': 'NYM', 'division': 'NL East', 'league_id': 104},
+    133: {'name': 'Athletics', 'abbr': 'ATH', 'division': 'AL West', 'league_id': 103},
+    134: {'name': 'Pittsburgh Pirates', 'abbr': 'PIT', 'division': 'NL Central', 'league_id': 104},
+    135: {'name': 'San Diego Padres', 'abbr': 'SD', 'division': 'NL West', 'league_id': 104},
+    136: {'name': 'Seattle Mariners', 'abbr': 'SEA', 'division': 'AL West', 'league_id': 103},
+    137: {'name': 'San Francisco Giants', 'abbr': 'SF', 'division': 'NL West', 'league_id': 104},
+    138: {'name': 'St. Louis Cardinals', 'abbr': 'STL', 'division': 'NL Central', 'league_id': 104},
+    139: {'name': 'Tampa Bay Rays', 'abbr': 'TB', 'division': 'AL East', 'league_id': 103},
+    140: {'name': 'Texas Rangers', 'abbr': 'TEX', 'division': 'AL West', 'league_id': 103},
+    141: {'name': 'Toronto Blue Jays', 'abbr': 'TOR', 'division': 'AL East', 'league_id': 103},
+    142: {'name': 'Minnesota Twins', 'abbr': 'MIN', 'division': 'AL Central', 'league_id': 103},
+    143: {'name': 'Philadelphia Phillies', 'abbr': 'PHI', 'division': 'NL East', 'league_id': 104},
+    144: {'name': 'Atlanta Braves', 'abbr': 'ATL', 'division': 'NL East', 'league_id': 104},
+    145: {'name': 'Chicago White Sox', 'abbr': 'CWS', 'division': 'AL Central', 'league_id': 103},
+    146: {'name': 'Miami Marlins', 'abbr': 'MIA', 'division': 'NL East', 'league_id': 104},
+    147: {'name': 'New York Yankees', 'abbr': 'NYY', 'division': 'AL East', 'league_id': 103},
+    158: {'name': 'Milwaukee Brewers', 'abbr': 'MIL', 'division': 'NL Central', 'league_id': 104},
+}
+
+
+def get_team_division(team_id: int) -> str:
+    """Return the division string for a team ID, e.g. 'AL Central'."""
+    info = TEAM_DIVISION_MAP.get(team_id)
+    return info['division'] if info else 'Unknown'
+
+
+def get_team_league_id(team_id: int) -> int:
+    """Return the league ID for a team (103=AL, 104=NL)."""
+    info = TEAM_DIVISION_MAP.get(team_id)
+    return info['league_id'] if info else 103
+
+
+def get_team_logo(team_id: int) -> str:
+    """Return the MLB Static logo URL for a team ID."""
+    if team_id and team_id > 0:
+        return f'https://www.mlbstatic.com/team-logos/{team_id}.svg'
+    return ''
+
+
+def get_team_id_by_name(team_name: str) -> int:
+    """Look up a team ID by full team name."""
+    for tid, info in TEAM_DIVISION_MAP.items():
+        if info['name'] == team_name:
+            return tid
+    return 0
+
 
 def _games_to_df(games: list[dict[str, Any]]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
