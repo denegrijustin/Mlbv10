@@ -812,6 +812,7 @@ def get_next_three_opponents(season_df: pd.DataFrame, team_name: str, from_date_
 def get_team_trend_snapshot(season_df: pd.DataFrame, team_name: str, games_window: int = 30) -> dict[str, Any]:
     """Rolling stats for team over last games_window completed games."""
     _empty = {
+        'team': team_name,
         'win_pct': 0.0, 'avg_runs_for': 0.0, 'avg_runs_against': 0.0,
         'run_diff_per_game': 0.0, 'record': '0-0', 'sample_size': 0,
     }
@@ -828,6 +829,7 @@ def get_team_trend_snapshot(season_df: pd.DataFrame, team_name: str, games_windo
     avg_rf = float(window['team_runs'].mean()) if played else 0.0
     avg_ra = float(window['opp_runs'].mean()) if played else 0.0
     return {
+        'team': team_name,
         'win_pct': round(wins / played, 3) if played else 0.0,
         'avg_runs_for': round(avg_rf, 2),
         'avg_runs_against': round(avg_ra, 2),
@@ -1054,7 +1056,8 @@ def run_monte_carlo_matchup(
     if ra_b > 0:
         inputs_used.append('avg_runs_against_b')
 
-    # Blend offense vs opponent defense; fallback to league average if zero
+    # Blend offense vs opponent defense; fallback to league average if zero.
+    # 4.5 R/G is the approximate MLB-wide average over the 2020s era.
     _league_avg = 4.5
     safe_rf_a = rf_a if rf_a > 0 else _league_avg
     safe_ra_b = ra_b if ra_b > 0 else _league_avg

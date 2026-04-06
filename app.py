@@ -555,13 +555,6 @@ with tab_compare:
             elif home_choice == f'{team_b_name} Home':
                 home_team = team_b_name
 
-            # run_monte_carlo_matchup resolves the home team by comparing home_team
-            # against snap['team']. get_team_trend_snapshot doesn't include a 'team'
-            # key, so we inject it here to ensure home-field advantage is applied
-            # to the correct team.
-            snap_a['team'] = team_a_name
-            snap_b['team'] = team_b_name
-
             with st.spinner(f'Running {n_sims:,} simulations...'):
                 mc_result = run_monte_carlo_matchup(snap_a, snap_b, n_sims, home_team)
 
