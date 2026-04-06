@@ -17,10 +17,137 @@ HEADERS = {
     'Accept': 'application/json,text/csv,*/*',
 }
 
+DEFAULT_TEAM_ID = 118  # Kansas City Royals
+
+# ---------------------------------------------------------------------------
+# Canonical team metadata for all 30 MLB teams
+# ---------------------------------------------------------------------------
+
+TEAM_META: dict[int, dict[str, Any]] = {
+    108: {'id': 108, 'abbreviation': 'LAA', 'full_name': 'Los Angeles Angels',     'league': 'AL', 'division': 'AL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/108.svg'},
+    109: {'id': 109, 'abbreviation': 'ARI', 'full_name': 'Arizona Diamondbacks',   'league': 'NL', 'division': 'NL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/109.svg'},
+    110: {'id': 110, 'abbreviation': 'BAL', 'full_name': 'Baltimore Orioles',      'league': 'AL', 'division': 'AL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/110.svg'},
+    111: {'id': 111, 'abbreviation': 'BOS', 'full_name': 'Boston Red Sox',         'league': 'AL', 'division': 'AL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/111.svg'},
+    112: {'id': 112, 'abbreviation': 'CHC', 'full_name': 'Chicago Cubs',           'league': 'NL', 'division': 'NL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/112.svg'},
+    113: {'id': 113, 'abbreviation': 'CIN', 'full_name': 'Cincinnati Reds',        'league': 'NL', 'division': 'NL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/113.svg'},
+    114: {'id': 114, 'abbreviation': 'CLE', 'full_name': 'Cleveland Guardians',    'league': 'AL', 'division': 'AL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/114.svg'},
+    115: {'id': 115, 'abbreviation': 'COL', 'full_name': 'Colorado Rockies',       'league': 'NL', 'division': 'NL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/115.svg'},
+    116: {'id': 116, 'abbreviation': 'DET', 'full_name': 'Detroit Tigers',         'league': 'AL', 'division': 'AL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/116.svg'},
+    117: {'id': 117, 'abbreviation': 'HOU', 'full_name': 'Houston Astros',         'league': 'AL', 'division': 'AL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/117.svg'},
+    118: {'id': 118, 'abbreviation': 'KC',  'full_name': 'Kansas City Royals',     'league': 'AL', 'division': 'AL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/118.svg'},
+    119: {'id': 119, 'abbreviation': 'LAD', 'full_name': 'Los Angeles Dodgers',    'league': 'NL', 'division': 'NL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/119.svg'},
+    120: {'id': 120, 'abbreviation': 'WSH', 'full_name': 'Washington Nationals',   'league': 'NL', 'division': 'NL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/120.svg'},
+    121: {'id': 121, 'abbreviation': 'NYM', 'full_name': 'New York Mets',          'league': 'NL', 'division': 'NL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/121.svg'},
+    133: {'id': 133, 'abbreviation': 'ATH', 'full_name': 'Athletics',              'league': 'AL', 'division': 'AL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/133.svg'},
+    134: {'id': 134, 'abbreviation': 'PIT', 'full_name': 'Pittsburgh Pirates',     'league': 'NL', 'division': 'NL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/134.svg'},
+    135: {'id': 135, 'abbreviation': 'SD',  'full_name': 'San Diego Padres',       'league': 'NL', 'division': 'NL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/135.svg'},
+    136: {'id': 136, 'abbreviation': 'SEA', 'full_name': 'Seattle Mariners',       'league': 'AL', 'division': 'AL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/136.svg'},
+    137: {'id': 137, 'abbreviation': 'SF',  'full_name': 'San Francisco Giants',   'league': 'NL', 'division': 'NL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/137.svg'},
+    138: {'id': 138, 'abbreviation': 'STL', 'full_name': 'St. Louis Cardinals',    'league': 'NL', 'division': 'NL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/138.svg'},
+    139: {'id': 139, 'abbreviation': 'TB',  'full_name': 'Tampa Bay Rays',         'league': 'AL', 'division': 'AL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/139.svg'},
+    140: {'id': 140, 'abbreviation': 'TEX', 'full_name': 'Texas Rangers',          'league': 'AL', 'division': 'AL West',    'logo_url': 'https://www.mlbstatic.com/team-logos/140.svg'},
+    141: {'id': 141, 'abbreviation': 'TOR', 'full_name': 'Toronto Blue Jays',      'league': 'AL', 'division': 'AL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/141.svg'},
+    142: {'id': 142, 'abbreviation': 'MIN', 'full_name': 'Minnesota Twins',        'league': 'AL', 'division': 'AL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/142.svg'},
+    143: {'id': 143, 'abbreviation': 'PHI', 'full_name': 'Philadelphia Phillies',  'league': 'NL', 'division': 'NL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/143.svg'},
+    144: {'id': 144, 'abbreviation': 'ATL', 'full_name': 'Atlanta Braves',         'league': 'NL', 'division': 'NL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/144.svg'},
+    145: {'id': 145, 'abbreviation': 'CWS', 'full_name': 'Chicago White Sox',      'league': 'AL', 'division': 'AL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/145.svg'},
+    146: {'id': 146, 'abbreviation': 'MIA', 'full_name': 'Miami Marlins',          'league': 'NL', 'division': 'NL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/146.svg'},
+    147: {'id': 147, 'abbreviation': 'NYY', 'full_name': 'New York Yankees',       'league': 'AL', 'division': 'AL East',    'logo_url': 'https://www.mlbstatic.com/team-logos/147.svg'},
+    158: {'id': 158, 'abbreviation': 'MIL', 'full_name': 'Milwaukee Brewers',      'league': 'NL', 'division': 'NL Central', 'logo_url': 'https://www.mlbstatic.com/team-logos/158.svg'},
+}
+
+# Pre-built lookup indexes (built once at import time)
+_ABBR_INDEX: dict[str, int] = {meta['abbreviation'].upper(): tid for tid, meta in TEAM_META.items()}
+_NAME_INDEX: dict[str, int] = {meta['full_name'].lower(): tid for tid, meta in TEAM_META.items()}
+
+# ---------------------------------------------------------------------------
+# Division / league ID mappings (MLB Stats API values)
+# ---------------------------------------------------------------------------
+
+DIVISION_LEAGUE_IDS: dict[str, int] = {
+    'AL East':    103,
+    'AL Central': 103,
+    'AL West':    103,
+    'NL East':    104,
+    'NL Central': 104,
+    'NL West':    104,
+}
+
+DIVISION_IDS: dict[str, int] = {
+    'AL East':    201,
+    'AL Central': 202,
+    'AL West':    200,
+    'NL East':    204,
+    'NL Central': 205,
+    'NL West':    203,
+}
+
+# Convenience: all known division names
+ALL_DIVISIONS: list[str] = list(DIVISION_IDS.keys())
+
+# FALLBACK_TEAMS kept for backward-compat with load_teams()
+FALLBACK_TEAMS = [
+    {'id': meta['id'], 'name': meta['full_name'], 'abbreviation': meta['abbreviation'], 'division': meta['division']}
+    for meta in TEAM_META.values()
+]
+
+
+# ---------------------------------------------------------------------------
+# Team-meta helper functions
+# ---------------------------------------------------------------------------
+
+def get_team_meta(team_id_or_abbr_or_name: int | str) -> dict[str, Any] | None:
+    """Return canonical team metadata dict or None if not found.
+
+    Accepts team_id (int), abbreviation (str, case-insensitive), or
+    full_name (str, case-insensitive).
+    """
+    key = team_id_or_abbr_or_name
+    if isinstance(key, int):
+        return TEAM_META.get(key)
+    if isinstance(key, str):
+        # Try as numeric id first
+        try:
+            return TEAM_META.get(int(key))
+        except (ValueError, TypeError):
+            pass
+        upper = key.strip().upper()
+        if upper in _ABBR_INDEX:
+            return TEAM_META[_ABBR_INDEX[upper]]
+        lower = key.strip().lower()
+        if lower in _NAME_INDEX:
+            return TEAM_META[_NAME_INDEX[lower]]
+    return None
+
+
+def get_team_logo(team_id_or_abbr_or_name: int | str) -> str:
+    """Return the SVG logo URL for a team, or empty string if not found."""
+    meta = get_team_meta(team_id_or_abbr_or_name)
+    return meta['logo_url'] if meta else ''
+
+
+def get_team_division(team_id_or_abbr_or_name: int | str) -> str:
+    """Return division name for a team, or empty string if not found."""
+    meta = get_team_meta(team_id_or_abbr_or_name)
+    return meta['division'] if meta else ''
+
+
+def get_teams_in_division(division_name: str) -> list[dict[str, Any]]:
+    """Return list of team metadata dicts for all teams in the given division."""
+    return [meta for meta in TEAM_META.values() if meta['division'] == division_name]
+
+
+# ---------------------------------------------------------------------------
+# Core MLB API error type
+# ---------------------------------------------------------------------------
 
 class MLBApiError(Exception):
     pass
 
+
+# ---------------------------------------------------------------------------
+# MLB API client
+# ---------------------------------------------------------------------------
 
 @dataclass
 class MLBClient:
@@ -64,42 +191,146 @@ class MLBClient:
         except Exception as exc:
             raise MLBApiError(f'Statcast CSV parse failed. {exc}') from exc
 
+    # ------------------------------------------------------------------
+    # Standings helpers
+    # ------------------------------------------------------------------
 
-FALLBACK_TEAMS = [
-    {'id': 108, 'name': 'Los Angeles Angels', 'abbreviation': 'LAA', 'division': 'AL West'},
-    {'id': 109, 'name': 'Arizona Diamondbacks', 'abbreviation': 'ARI', 'division': 'NL West'},
-    {'id': 110, 'name': 'Baltimore Orioles', 'abbreviation': 'BAL', 'division': 'AL East'},
-    {'id': 111, 'name': 'Boston Red Sox', 'abbreviation': 'BOS', 'division': 'AL East'},
-    {'id': 112, 'name': 'Chicago Cubs', 'abbreviation': 'CHC', 'division': 'NL Central'},
-    {'id': 113, 'name': 'Cincinnati Reds', 'abbreviation': 'CIN', 'division': 'NL Central'},
-    {'id': 114, 'name': 'Cleveland Guardians', 'abbreviation': 'CLE', 'division': 'AL Central'},
-    {'id': 115, 'name': 'Colorado Rockies', 'abbreviation': 'COL', 'division': 'NL West'},
-    {'id': 116, 'name': 'Detroit Tigers', 'abbreviation': 'DET', 'division': 'AL Central'},
-    {'id': 117, 'name': 'Houston Astros', 'abbreviation': 'HOU', 'division': 'AL West'},
-    {'id': 118, 'name': 'Kansas City Royals', 'abbreviation': 'KC', 'division': 'AL Central'},
-    {'id': 119, 'name': 'Los Angeles Dodgers', 'abbreviation': 'LAD', 'division': 'NL West'},
-    {'id': 120, 'name': 'Washington Nationals', 'abbreviation': 'WSH', 'division': 'NL East'},
-    {'id': 121, 'name': 'New York Mets', 'abbreviation': 'NYM', 'division': 'NL East'},
-    {'id': 133, 'name': 'Athletics', 'abbreviation': 'ATH', 'division': 'AL West'},
-    {'id': 134, 'name': 'Pittsburgh Pirates', 'abbreviation': 'PIT', 'division': 'NL Central'},
-    {'id': 135, 'name': 'San Diego Padres', 'abbreviation': 'SD', 'division': 'NL West'},
-    {'id': 136, 'name': 'Seattle Mariners', 'abbreviation': 'SEA', 'division': 'AL West'},
-    {'id': 137, 'name': 'San Francisco Giants', 'abbreviation': 'SF', 'division': 'NL West'},
-    {'id': 138, 'name': 'St. Louis Cardinals', 'abbreviation': 'STL', 'division': 'NL Central'},
-    {'id': 139, 'name': 'Tampa Bay Rays', 'abbreviation': 'TB', 'division': 'AL East'},
-    {'id': 140, 'name': 'Texas Rangers', 'abbreviation': 'TEX', 'division': 'AL West'},
-    {'id': 141, 'name': 'Toronto Blue Jays', 'abbreviation': 'TOR', 'division': 'AL East'},
-    {'id': 142, 'name': 'Minnesota Twins', 'abbreviation': 'MIN', 'division': 'AL Central'},
-    {'id': 143, 'name': 'Philadelphia Phillies', 'abbreviation': 'PHI', 'division': 'NL East'},
-    {'id': 144, 'name': 'Atlanta Braves', 'abbreviation': 'ATL', 'division': 'NL East'},
-    {'id': 145, 'name': 'Chicago White Sox', 'abbreviation': 'CWS', 'division': 'AL Central'},
-    {'id': 146, 'name': 'Miami Marlins', 'abbreviation': 'MIA', 'division': 'NL East'},
-    {'id': 147, 'name': 'New York Yankees', 'abbreviation': 'NYY', 'division': 'AL East'},
-    {'id': 158, 'name': 'Milwaukee Brewers', 'abbreviation': 'MIL', 'division': 'NL Central'},
-]
+    def get_standings_for_division(self, division_name: str, season: int) -> tuple[pd.DataFrame, str | None]:
+        """Return standings DataFrame for a single division.
 
+        Columns: team_id, team_name, wins, losses, gb, win_pct, division_rank
+        """
+        _empty = pd.DataFrame(columns=['team_id', 'team_name', 'wins', 'losses', 'gb', 'win_pct', 'division_rank'])
+        division_id = DIVISION_IDS.get(division_name)
+        league_id = DIVISION_LEAGUE_IDS.get(division_name)
+        if division_id is None or league_id is None:
+            return _empty, f'Unknown division: {division_name!r}'
+        try:
+            data = self.get_standings({
+                'leagueId': league_id,
+                'standingsTypes': 'regularSeason',
+                'season': season,
+            })
+            rows: list[dict[str, Any]] = []
+            for record in data.get('records', []):
+                div_info = record.get('division') or {}
+                if coerce_int(div_info.get('id'), -1) != division_id:
+                    continue
+                for tr in record.get('teamRecords', []):
+                    team_info = tr.get('team') or {}
+                    gb_raw = tr.get('gamesBack', '--')
+                    gb_str = '--' if str(gb_raw).strip() in ('', '-', 'None', 'null') else str(gb_raw).strip()
+                    wins = coerce_int(tr.get('wins'), 0)
+                    losses = coerce_int(tr.get('losses'), 0)
+                    played = wins + losses
+                    win_pct = round(wins / played, 3) if played > 0 else 0.0
+                    rows.append({
+                        'team_id': coerce_int(team_info.get('id'), 0),
+                        'team_name': clean_text(team_info.get('name')),
+                        'wins': wins,
+                        'losses': losses,
+                        'gb': gb_str,
+                        'win_pct': win_pct,
+                        'division_rank': coerce_int(tr.get('divisionRank'), 0),
+                    })
+            if not rows:
+                return _empty, f'No standings data returned for {division_name} season {season}.'
+            df = pd.DataFrame(rows).sort_values('division_rank').reset_index(drop=True)
+            df['team_id'] = df['team_id'].astype(int)
+            df['wins'] = df['wins'].astype(int)
+            df['losses'] = df['losses'].astype(int)
+            df['win_pct'] = df['win_pct'].astype(float)
+            df['division_rank'] = df['division_rank'].astype(int)
+            df['gb'] = df['gb'].astype(str)
+            df['team_name'] = df['team_name'].astype(str)
+            return df, None
+        except MLBApiError as exc:
+            return _empty, str(exc)
+        except Exception as exc:
+            return _empty, f'Unexpected error fetching division standings: {exc}'
+
+    def get_wildcard_standings_by_league(self, league: str, season: int) -> tuple[pd.DataFrame, str | None]:
+        """Return wild-card standings for one league ('AL' or 'NL').
+
+        Columns: team_id, team_name, wins, losses, gb, win_pct, wc_rank
+        """
+        _empty = pd.DataFrame(columns=['team_id', 'team_name', 'wins', 'losses', 'gb', 'win_pct', 'wc_rank'])
+        league_upper = league.strip().upper()
+        league_id_map = {'AL': 103, 'NL': 104}
+        league_id = league_id_map.get(league_upper)
+        if league_id is None:
+            return _empty, f'Unknown league: {league!r}. Use "AL" or "NL".'
+        try:
+            data = self.get_standings({
+                'leagueId': league_id,
+                'standingsTypes': 'wildCard',
+                'season': season,
+            })
+            rows: list[dict[str, Any]] = []
+            for record in data.get('records', []):
+                for tr in record.get('teamRecords', []):
+                    team_info = tr.get('team') or {}
+                    gb_raw = tr.get('wildCardGamesBack', tr.get('gamesBack', '--'))
+                    gb_str = '--' if str(gb_raw).strip() in ('', '-', 'None', 'null') else str(gb_raw).strip()
+                    wins = coerce_int(tr.get('wins'), 0)
+                    losses = coerce_int(tr.get('losses'), 0)
+                    played = wins + losses
+                    win_pct = round(wins / played, 3) if played > 0 else 0.0
+                    rows.append({
+                        'team_id': coerce_int(team_info.get('id'), 0),
+                        'team_name': clean_text(team_info.get('name')),
+                        'wins': wins,
+                        'losses': losses,
+                        'gb': gb_str,
+                        'win_pct': win_pct,
+                        'wc_rank': coerce_int(tr.get('wildCardRank'), 0),
+                    })
+            if not rows:
+                return _empty, f'No wild-card standings returned for {league_upper} season {season}.'
+            df = pd.DataFrame(rows).sort_values('wc_rank').reset_index(drop=True)
+            df['team_id'] = df['team_id'].astype(int)
+            df['wins'] = df['wins'].astype(int)
+            df['losses'] = df['losses'].astype(int)
+            df['win_pct'] = df['win_pct'].astype(float)
+            df['wc_rank'] = df['wc_rank'].astype(int)
+            df['gb'] = df['gb'].astype(str)
+            df['team_name'] = df['team_name'].astype(str)
+            return df, None
+        except MLBApiError as exc:
+            return _empty, str(exc)
+        except Exception as exc:
+            return _empty, f'Unexpected error fetching wild-card standings: {exc}'
+
+    def get_team_schedule_range(self, team_id: int, start_date: str, end_date: str) -> tuple[pd.DataFrame, str | None]:
+        """Return completed-game schedule for a team over a date range.
+
+        Columns match _games_to_df output; only games with abstract_status=='Final' are returned.
+        """
+        try:
+            games = self.get_schedule({
+                'sportId': 1,
+                'teamId': team_id,
+                'startDate': start_date,
+                'endDate': end_date,
+                'gameType': 'R',
+                'hydrate': 'team',
+            })
+            df = _games_to_df(games)
+            if df.empty:
+                return df, None
+            completed = df[df['abstract_status'] == 'Final'].reset_index(drop=True)
+            return completed, None
+        except Exception as exc:
+            return _games_to_df([]), str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _games_to_df(games: list[dict[str, Any]]) -> pd.DataFrame:
+    _cols = ['gamePk', 'gameDate', 'officialDate', 'away', 'home',
+             'away_id', 'home_id', 'away_score', 'home_score', 'status', 'abstract_status']
     rows: list[dict[str, Any]] = []
     for g in games:
         teams = g.get('teams', {})
@@ -119,11 +350,15 @@ def _games_to_df(games: list[dict[str, Any]]) -> pd.DataFrame:
             'status': clean_text(status_obj.get('detailedState') or status_obj.get('abstractGameState'), 'Unknown'),
             'abstract_status': clean_text(status_obj.get('abstractGameState'), 'Unknown'),
         })
+    if not rows:
+        return pd.DataFrame(columns=_cols)
     df = pd.DataFrame(rows)
-    if df.empty:
-        return pd.DataFrame(columns=['gamePk', 'gameDate', 'officialDate', 'away', 'home', 'away_id', 'home_id', 'away_score', 'home_score', 'status', 'abstract_status'])
     return df.sort_values(['officialDate', 'gameDate', 'gamePk']).reset_index(drop=True)
 
+
+# ---------------------------------------------------------------------------
+# Top-level API functions
+# ---------------------------------------------------------------------------
 
 def load_teams() -> tuple[pd.DataFrame, str | None]:
     client = MLBClient()
@@ -140,7 +375,8 @@ def load_teams() -> tuple[pd.DataFrame, str | None]:
         df = pd.DataFrame(rows).sort_values('name').reset_index(drop=True)
         return df, None
     except Exception as exc:
-        return pd.DataFrame(FALLBACK_TEAMS).sort_values('name').reset_index(drop=True), f'Live MLB teams call failed. Using built-in team list instead. {exc}'
+        fallback = pd.DataFrame(FALLBACK_TEAMS).sort_values('name').reset_index(drop=True)
+        return fallback, f'Live MLB teams call failed. Using built-in team list instead. {exc}'
 
 
 def build_schedule_df(team_id: int, target_date: str) -> tuple[pd.DataFrame, str | None]:
@@ -215,7 +451,11 @@ def get_live_summary(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
     return {}, 'Live feed unavailable'
 
 
-def get_wildcard_standings(season: int) -> tuple[pd.DataFrame, str | None]:
+def get_wildcard_standings_combined(season: int) -> tuple[pd.DataFrame, str | None]:
+    """Wild-card standings for both leagues combined (AL + NL).
+
+    Columns: team_id, team_name, wildcard_rank, wins, losses
+    """
     client = MLBClient()
     try:
         data = client.get_standings({
@@ -223,7 +463,7 @@ def get_wildcard_standings(season: int) -> tuple[pd.DataFrame, str | None]:
             'standingsTypes': 'wildCard',
             'season': season,
         })
-        rows = []
+        rows: list[dict[str, Any]] = []
         for division_data in data.get('records', []):
             for team_record in division_data.get('teamRecords', []):
                 team_info = team_record.get('team', {})
@@ -239,6 +479,63 @@ def get_wildcard_standings(season: int) -> tuple[pd.DataFrame, str | None]:
         return df, None
     except Exception as exc:
         return pd.DataFrame(columns=['team_id', 'team_name', 'wildcard_rank', 'wins', 'losses']), str(exc)
+
+
+# Backward-compat alias for code that previously called get_wildcard_standings
+get_wildcard_standings = get_wildcard_standings_combined
+
+
+def get_division_standings(division_name: str, season: int) -> tuple[pd.DataFrame, str | None]:
+    """Return standings for a single division.
+
+    Delegates to MLBClient.get_standings_for_division.
+    Columns: team_id, team_name, wins, losses, gb, win_pct, division_rank
+    """
+    return MLBClient().get_standings_for_division(division_name, season)
+
+
+def get_wildcard_standings_league(league: str, season: int) -> tuple[pd.DataFrame, str | None]:
+    """Return wild-card standings for one league ('AL' or 'NL').
+
+    Delegates to MLBClient.get_wildcard_standings_by_league.
+    Columns: team_id, team_name, wins, losses, gb, win_pct, wc_rank
+    """
+    return MLBClient().get_wildcard_standings_by_league(league, season)
+
+
+def get_upcoming_schedule(team_id: int, from_date: str, num_games: int = 10) -> tuple[pd.DataFrame, str | None]:
+    """Return the next *num_games* scheduled (not yet played) games for a team.
+
+    Games are fetched starting from *from_date* for a 60-day window and
+    filtered to those that have not been completed (abstract_status != 'Final').
+
+    Columns: gamePk, gameDate, officialDate, away, home, away_id, home_id,
+             away_score, home_score, status, abstract_status
+    """
+    _empty = _games_to_df([])
+    try:
+        from datetime import date, timedelta
+        try:
+            start = date.fromisoformat(from_date)
+        except ValueError:
+            return _empty, f'Invalid from_date: {from_date!r}. Expected YYYY-MM-DD.'
+        end = start + timedelta(days=60)
+        client = MLBClient()
+        games = client.get_schedule({
+            'sportId': 1,
+            'teamId': team_id,
+            'startDate': start.isoformat(),
+            'endDate': end.isoformat(),
+            'gameType': 'R',
+            'hydrate': 'team',
+        })
+        df = _games_to_df(games)
+        if df.empty:
+            return df, None
+        upcoming = df[df['abstract_status'] != 'Final'].head(num_games).reset_index(drop=True)
+        return upcoming, None
+    except Exception as exc:
+        return _empty, str(exc)
 
 
 def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_type: str = 'batter') -> tuple[pd.DataFrame, str | None]:
@@ -268,7 +565,8 @@ def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_
         if df is None or df.empty:
             return pd.DataFrame(), 'Statcast returned no rows for the selected window.'
         out = df.copy()
-        for col in ['launch_speed', 'launch_angle', 'hit_distance_sc', 'release_speed', 'release_spin_rate', 'estimated_woba_using_speedangle', 'woba_value', 'hc_x', 'hc_y']:
+        for col in ['launch_speed', 'launch_angle', 'hit_distance_sc', 'release_speed',
+                    'release_spin_rate', 'estimated_woba_using_speedangle', 'woba_value', 'hc_x', 'hc_y']:
             if col in out.columns:
                 out[col] = out[col].apply(coerce_float)
         return out, None
