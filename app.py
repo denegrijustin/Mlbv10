@@ -11,7 +11,7 @@ from mlb_api import (
 from data_helpers import (
     safe_team_row, build_team_snapshot, build_summary_df,
     build_trend_df, build_recent_games_df,
-    build_live_box_df, build_kpi_cards, build_team_rolling_df,
+    build_live_box_df, build_team_rolling_df,
     build_pitch_mix_df, build_statcast_summary_df,
     build_opponent_heat_df, build_runs_per_inning_df,
     build_change_since_last_game_df,
@@ -151,7 +151,6 @@ summary_df = build_summary_df(snapshot)
 trend_df = build_trend_df(season_df, team_name)
 recent_games_df = build_recent_games_df(season_df, team_name, count=10)
 rolling_df = build_team_rolling_df(recent_games_df)
-kpi_cards = build_kpi_cards(snapshot, trend_df)
 change_df = build_change_since_last_game_df(season_df, team_name)
 
 # Opponent heat check
@@ -193,16 +192,17 @@ war_display_df = build_war_display_df(war_df, team_player_names if team_player_n
 # Row 1: Record + Season Run Diff
 row1_left, row1_right = st.columns(2)
 row1_left.metric('Record', snapshot.get('record', '0-0'), f"{snapshot.get('win_pct', 0.0)}% win pct")
-row1_right.metric('Season Run Diff', snapshot.get('run_diff', 0),
-                   f"+{snapshot.get('run_diff', 0)}" if snapshot.get('run_diff', 0) >= 0 else str(snapshot.get('run_diff', 0)))
+run_diff = snapshot.get('run_diff', 0)
+row1_right.metric('Season Run Diff', run_diff,
+                   f'+{run_diff}' if run_diff >= 0 else str(run_diff))
 
 # Row 2: Season Avg RF + Season Avg RA
 lookup = {row['Metric']: row for _, row in trend_df.iterrows()} if not trend_df.empty else {}
 row2_left, row2_right = st.columns(2)
 row2_left.metric('Season Avg RF', snapshot.get('avg_runs_for', 0.0),
-                  lookup.get('Last 5 Avg Runs For', {}).get('Trend', '🟡 Even'))
+                  lookup.get('Last 5 Avg Runs For', {}).get('Trend', '🟡 0.00'))
 row2_right.metric('Season Avg RA', snapshot.get('avg_runs_against', 0.0),
-                   lookup.get('Last 5 Avg Runs Against', {}).get('Trend', '🟡 Even'))
+                   lookup.get('Last 5 Avg Runs Against', {}).get('Trend', '🟡 0.00'))
 
 # Row 3: Wildcard Rank
 wc_col, _ = st.columns(2)
