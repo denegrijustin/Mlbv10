@@ -241,6 +241,54 @@ def get_wildcard_standings(season: int) -> tuple[pd.DataFrame, str | None]:
         return pd.DataFrame(columns=['team_id', 'team_name', 'wildcard_rank', 'wins', 'losses']), str(exc)
 
 
+def get_division_standings(season: int, league_id: int = 103) -> tuple[pd.DataFrame, str | None]:
+    """Fetch division standings for a given league.
+
+    Args:
+        season: MLB season year.
+        league_id: 103 = AL, 104 = NL.
+
+    Returns:
+        DataFrame with columns [team_id, team_name, division, wins, losses,
+        pct, gb, streak] and an optional error string.
+    """
+    client = MLBClient()
+    cols = ['team_id', 'team_name', 'division', 'wins', 'losses', 'pct', 'gb', 'streak']
+    try:
+        data = client.get_standings({
+            'leagueId': str(league_id),
+            'standingsTypes': 'regularSeason',
+            'season': season,
+            'hydrate': 'team',
+        })
+        rows: list[dict] = []
+        for record_group in data.get('records', []):
+            div_name = clean_text(
+                (record_group.get('division') or {}).get('name'),
+                'Unknown',
+            )
+            for tr in record_group.get('teamRecords', []):
+                team_info = tr.get('team', {})
+                streak_obj = tr.get('streak', {})
+                rows.append({
+                    'team_id': coerce_int(team_info.get('id'), 0),
+                    'team_name': clean_text(team_info.get('name')),
+                    'division': div_name,
+                    'wins': coerce_int(tr.get('wins'), 0),
+                    'losses': coerce_int(tr.get('losses'), 0),
+                    'pct': clean_text(tr.get('winningPercentage'), '.000'),
+                    'gb': clean_text(tr.get('gamesBack'), '-'),
+                    'streak': clean_text(
+                        f"{streak_obj.get('streakType', '?')}{streak_obj.get('streakNumber', 0)}"
+                        if streak_obj else '-',
+                    ),
+                })
+        df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(columns=cols), str(exc)
+
+
 def fetch_war_df(season: int) -> tuple[pd.DataFrame, str | None]:
     """Fetch season batting WAR from pybaseball.
 

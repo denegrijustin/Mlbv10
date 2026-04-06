@@ -24,7 +24,7 @@ def render_schedule_chart(schedule_df: pd.DataFrame) -> None:
     df['matchup'] = df['away'] + ' at ' + df['home']
     fig = px.bar(df, x='matchup', y=['away_score', 'home_score'], barmode='group', title="Today's Score Snapshot")
     fig.update_layout(height=380, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+    st.plotly_chart(fig, config=_get_plotly_config())
 
 
 def render_recent_trend_chart(recent_games_df: pd.DataFrame) -> None:
@@ -34,7 +34,7 @@ def render_recent_trend_chart(recent_games_df: pd.DataFrame) -> None:
     df = recent_games_df.copy()
     fig = px.line(df, x='Date', y=['Team Runs', 'Opp Runs'], markers=True, title='Recent Runs Trend')
     fig.update_layout(height=400, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+    st.plotly_chart(fig, config=_get_plotly_config())
 
 
 def render_run_diff_chart(recent_games_df: pd.DataFrame) -> None:
@@ -42,7 +42,7 @@ def render_run_diff_chart(recent_games_df: pd.DataFrame) -> None:
         return
     fig = px.bar(recent_games_df, x='Date', y='Run Diff', color='Result', title='Recent Game Run Differential')
     fig.update_layout(height=360, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+    st.plotly_chart(fig, config=_get_plotly_config())
 
 
 def render_rolling_chart(rolling_df: pd.DataFrame) -> None:
@@ -51,7 +51,7 @@ def render_rolling_chart(rolling_df: pd.DataFrame) -> None:
         return
     fig = px.line(rolling_df, x='Date', y=['Runs 3', 'Runs 5', 'Diff 3', 'Diff 5'], markers=True, title='Rolling Team Trend Lines')
     fig.update_layout(height=420, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+    st.plotly_chart(fig, config=_get_plotly_config())
 
 
 def render_pitch_mix_chart(pitch_mix_df: pd.DataFrame) -> None:
@@ -60,16 +60,22 @@ def render_pitch_mix_chart(pitch_mix_df: pd.DataFrame) -> None:
         return
     fig = px.bar(pitch_mix_df, x='Pitch Type', y='Usage %', color='Success', title='Pitch Type Usage')
     fig.update_layout(height=380, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+    st.plotly_chart(fig, config=_get_plotly_config())
 
 
 def render_statcast_scatter(batter_df: pd.DataFrame) -> None:
     if batter_df.empty:
         st.info('Exit velocity data is not available yet.')
         return
-    fig = px.scatter(batter_df, x='Avg EV', y='Hard Hit %', size='BIP', color='Grade', hover_name='Batter', title='Batter Quality of Contact')
+    required = {'Avg EV', 'Hard Hit %', 'Batter'}
+    missing = required - set(batter_df.columns)
+    if missing:
+        st.warning(f'Scatter chart missing columns: {", ".join(sorted(missing))}')
+        return
+    size_col = 'PA' if 'PA' in batter_df.columns else None
+    fig = px.scatter(batter_df, x='Avg EV', y='Hard Hit %', size=size_col, color='Grade' if 'Grade' in batter_df.columns else None, hover_name='Batter', title='Batter Quality of Contact')
     fig.update_layout(height=420, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+    st.plotly_chart(fig, key='statcast_scatter', config=_get_plotly_config())
 
 
 def render_spray_chart(statcast_df: pd.DataFrame, chart_type: str = 'offensive') -> None:
@@ -186,7 +192,7 @@ def render_spray_chart(statcast_df: pd.DataFrame, chart_type: str = 'offensive')
         margin=dict(l=50, r=50, t=50, b=50),
     )
     
-    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+    st.plotly_chart(fig, config=_get_plotly_config())
 
 
 def render_runs_per_inning_chart(rpi_df: pd.DataFrame) -> None:
@@ -219,4 +225,4 @@ def render_runs_per_inning_chart(rpi_df: pd.DataFrame) -> None:
         height=420,
         margin=dict(l=20, r=20, t=50, b=20),
     )
-    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+    st.plotly_chart(fig, config=_get_plotly_config())

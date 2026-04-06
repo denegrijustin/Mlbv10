@@ -150,15 +150,15 @@ def build_trend_df(season_df: pd.DataFrame, team_name: str) -> pd.DataFrame:
     away_split = finals[finals['location'] == 'Away']
 
     rows = [
-        {'Metric': 'Season Avg Runs For', 'Value': round(season_rf, 2), 'Trend': '🟡 Baseline'},
-        {'Metric': 'Season Avg Runs Against', 'Value': round(season_ra, 2), 'Trend': '🟡 Baseline'},
-        {'Metric': 'Last 5 Avg Runs For', 'Value': round(last5_rf, 2), 'Trend': stoplight(last5_rf - prev5_rf)},
-        {'Metric': 'Last 5 Avg Runs Against', 'Value': round(last5_ra, 2), 'Trend': stoplight(prev5_ra - last5_ra)},
+        {'Metric': 'Season Avg Runs For', 'Value': str(round(season_rf, 2)), 'Trend': '🟡 Baseline'},
+        {'Metric': 'Season Avg Runs Against', 'Value': str(round(season_ra, 2)), 'Trend': '🟡 Baseline'},
+        {'Metric': 'Last 5 Avg Runs For', 'Value': str(round(last5_rf, 2)), 'Trend': stoplight(last5_rf - prev5_rf)},
+        {'Metric': 'Last 5 Avg Runs Against', 'Value': str(round(last5_ra, 2)), 'Trend': stoplight(prev5_ra - last5_ra)},
         {'Metric': 'Last 10 Record', 'Value': format_record(last10_wins, len(last_10) - last10_wins), 'Trend': stoplight((last10_wins / max(len(last_10), 1)) - 0.5)},
-        {'Metric': 'Last 10 Run Differential / Game', 'Value': round(last_10['run_diff'].mean(), 2), 'Trend': stoplight(last_10['run_diff'].mean())},
-        {'Metric': 'Scoring Consistency Std Dev', 'Value': consistency, 'Trend': stoplight(2.5 - consistency)},
-        {'Metric': 'Home Avg Runs', 'Value': round(home_split['team_runs'].mean(), 2) if not home_split.empty else 0.0, 'Trend': '🟡 Split'},
-        {'Metric': 'Away Avg Runs', 'Value': round(away_split['team_runs'].mean(), 2) if not away_split.empty else 0.0, 'Trend': '🟡 Split'},
+        {'Metric': 'Last 10 Run Differential / Game', 'Value': str(round(last_10['run_diff'].mean(), 2)), 'Trend': stoplight(last_10['run_diff'].mean())},
+        {'Metric': 'Scoring Consistency Std Dev', 'Value': str(consistency), 'Trend': stoplight(2.5 - consistency)},
+        {'Metric': 'Home Avg Runs', 'Value': str(round(home_split['team_runs'].mean(), 2)) if not home_split.empty else '0.0', 'Trend': '🟡 Split'},
+        {'Metric': 'Away Avg Runs', 'Value': str(round(away_split['team_runs'].mean(), 2)) if not away_split.empty else '0.0', 'Trend': '🟡 Split'},
     ]
     return pd.DataFrame(rows)
 
@@ -197,7 +197,7 @@ def build_live_box_df(live_summary: dict[str, Any]) -> pd.DataFrame:
         return pd.DataFrame(columns=['Field', 'Value'])
     return pd.DataFrame([
         {'Field': 'Matchup', 'Value': f"{live_summary.get('away_team', '-')} at {live_summary.get('home_team', '-')}"},
-        {'Field': 'Status', 'Value': live_summary.get('status', '-')},
+        {'Field': 'Status', 'Value': str(live_summary.get('status', '-'))},
         {'Field': 'Inning', 'Value': f"{live_summary.get('inning_state', '-')} {live_summary.get('inning', '-')}"},
         {'Field': 'Score', 'Value': f"{live_summary.get('away_runs', 0)}-{live_summary.get('home_runs', 0)}"},
         {'Field': 'Count', 'Value': f"{live_summary.get('balls', 0)} balls, {live_summary.get('strikes', 0)} strikes, {live_summary.get('outs', 0)} outs"},
@@ -208,8 +208,8 @@ def build_kpi_cards(snapshot: dict[str, Any], trend_df: pd.DataFrame) -> list[di
     lookup = {row['Metric']: row for _, row in trend_df.iterrows()} if not trend_df.empty else {}
     return [
         {'label': 'Record', 'value': snapshot.get('record', '0-0'), 'delta': f"{snapshot.get('win_pct', 0.0)}% win pct"},
-        {'label': 'Season Avg RF', 'value': snapshot.get('avg_runs_for', 0.0), 'delta': lookup.get('Last 5 Avg Runs For', {}).get('Trend', '🟡 Even')},
-        {'label': 'Season Avg RA', 'value': snapshot.get('avg_runs_against', 0.0), 'delta': lookup.get('Last 5 Avg Runs Against', {}).get('Trend', '🟡 Even')},
+        {'label': 'Season Avg RF', 'value': snapshot.get('avg_runs_for', 0.0), 'delta': lookup.get('Last 5 Avg Runs For', {}).get('Trend', '🟡 0.00')},
+        {'label': 'Season Avg RA', 'value': snapshot.get('avg_runs_against', 0.0), 'delta': lookup.get('Last 5 Avg Runs Against', {}).get('Trend', '🟡 0.00')},
         {'label': 'Run Diff', 'value': snapshot.get('run_diff', 0), 'delta': signed(coerce_float(snapshot.get('avg_runs_for', 0.0)) - coerce_float(snapshot.get('avg_runs_against', 0.0)), 2)},
     ]
 
@@ -713,8 +713,8 @@ def build_change_since_last_game_df(season_df: pd.DataFrame, team_name: str) -> 
     delta_rs = int(last['team_runs']) - int(prev['team_runs'])
     rows.append({
         'Metric': 'Runs Scored',
-        'Last Game': int(last['team_runs']),
-        'Prev Game': int(prev['team_runs']),
+        'Last Game': str(int(last['team_runs'])),
+        'Prev Game': str(int(prev['team_runs'])),
         'Change': signed(delta_rs, 0),
         'Signal': stoplight(delta_rs, neutral_band=0),
     })
@@ -722,8 +722,8 @@ def build_change_since_last_game_df(season_df: pd.DataFrame, team_name: str) -> 
     delta_ra = int(last['opp_runs']) - int(prev['opp_runs'])
     rows.append({
         'Metric': 'Runs Allowed',
-        'Last Game': int(last['opp_runs']),
-        'Prev Game': int(prev['opp_runs']),
+        'Last Game': str(int(last['opp_runs'])),
+        'Prev Game': str(int(prev['opp_runs'])),
         'Change': signed(delta_ra, 0),
         'Signal': stoplight(-delta_ra, neutral_band=0),
     })
@@ -733,16 +733,16 @@ def build_change_since_last_game_df(season_df: pd.DataFrame, team_name: str) -> 
     delta_diff = last_diff - prev_diff
     rows.append({
         'Metric': 'Run Differential',
-        'Last Game': last_diff,
-        'Prev Game': prev_diff,
+        'Last Game': str(last_diff),
+        'Prev Game': str(prev_diff),
         'Change': signed(delta_diff, 0),
         'Signal': stoplight(delta_diff, neutral_band=0),
     })
 
     rows.append({
         'Metric': 'Result',
-        'Last Game': last['result'],
-        'Prev Game': prev['result'],
+        'Last Game': str(last['result']),
+        'Prev Game': str(prev['result']),
         'Change': '-',
         'Signal': '🟢' if last['result'] == 'W' else '🔴',
     })
@@ -759,9 +759,94 @@ def build_statcast_summary_df(statcast_batter_df: pd.DataFrame, statcast_pitcher
     avg_ev = batter_contact['launch_speed'].mean() if not batter_contact.empty else 0.0
     hard_hit = (batter_contact['launch_speed'] >= 95).mean() * 100 if not batter_contact.empty else 0.0
     return pd.DataFrame([
-        {'Metric': 'Team Avg Exit Velocity', 'Value': round(avg_ev, 1), 'Trend': stoplight(avg_ev - 89, neutral_band=1)},
-        {'Metric': 'Team Hard Hit %', 'Value': round(hard_hit, 1), 'Trend': stoplight(hard_hit - 40, neutral_band=3)},
-        {'Metric': 'Staff Avg Spin Rate', 'Value': round(avg_spin, 0), 'Trend': stoplight(avg_spin - 2250, neutral_band=50)},
-        {'Metric': 'Staff Whiff %', 'Value': round(pitch_whiff, 1), 'Trend': stoplight(pitch_whiff - 28, neutral_band=2)},
-        {'Metric': 'Pitch Sample Size', 'Value': total_pitcher, 'Trend': '🟡 Context'},
+        {'Metric': 'Team Avg Exit Velocity', 'Value': str(round(avg_ev, 1)), 'Trend': stoplight(avg_ev - 89, neutral_band=1)},
+        {'Metric': 'Team Hard Hit %', 'Value': str(round(hard_hit, 1)), 'Trend': stoplight(hard_hit - 40, neutral_band=3)},
+        {'Metric': 'Staff Avg Spin Rate', 'Value': str(round(avg_spin, 0)), 'Trend': stoplight(avg_spin - 2250, neutral_band=50)},
+        {'Metric': 'Staff Whiff %', 'Value': str(round(pitch_whiff, 1)), 'Trend': stoplight(pitch_whiff - 28, neutral_band=2)},
+        {'Metric': 'Pitch Sample Size', 'Value': str(total_pitcher), 'Trend': '🟡 Context'},
     ])
+
+
+def build_division_standings_display(
+    division_df: pd.DataFrame,
+    division_name: str = 'American League Central',
+) -> pd.DataFrame:
+    """Build a display-ready standings table for a single division.
+
+    Args:
+        division_df: Full standings DataFrame with a ``division`` column.
+        division_name: Division name to filter on.
+
+    Returns:
+        Cleaned DataFrame with columns [Team, W, L, Pct, GB, Streak].
+    """
+    cols = ['Team', 'W', 'L', 'Pct', 'GB', 'Streak']
+    if division_df.empty:
+        return pd.DataFrame(columns=cols)
+    div = division_df[division_df['division'].str.contains(division_name, case=False, na=False)].copy()
+    if div.empty:
+        return pd.DataFrame(columns=cols)
+    div = div.sort_values('wins', ascending=False).reset_index(drop=True)
+    return pd.DataFrame({
+        'Team': div['team_name'].astype(str),
+        'W': div['wins'].astype(str),
+        'L': div['losses'].astype(str),
+        'Pct': div['pct'].astype(str),
+        'GB': div['gb'].astype(str),
+        'Streak': div['streak'].astype(str),
+    })
+
+
+def build_wildcard_top5_display(standings_df: pd.DataFrame) -> pd.DataFrame:
+    """Return a display table of the top-5 wildcard teams.
+
+    Args:
+        standings_df: Wildcard standings from ``get_wildcard_standings``.
+
+    Returns:
+        DataFrame with columns [Rank, Team, W, L].
+    """
+    cols = ['Rank', 'Team', 'W', 'L']
+    if standings_df.empty:
+        return pd.DataFrame(columns=cols)
+    df = standings_df.dropna(subset=['wildcard_rank']).copy()
+    df['wildcard_rank'] = df['wildcard_rank'].astype(int)
+    df = df.sort_values('wildcard_rank').head(5).reset_index(drop=True)
+    return pd.DataFrame({
+        'Rank': df['wildcard_rank'].astype(str),
+        'Team': df['team_name'].astype(str),
+        'W': df['wins'].astype(str),
+        'L': df['losses'].astype(str),
+    })
+
+
+def build_war_display_df(war_df: pd.DataFrame, player_names: list[str] | None = None) -> pd.DataFrame:
+    """Build a WAR display table for a list of players.
+
+    Args:
+        war_df: Season WAR data from pybaseball with columns [Name, WAR].
+        player_names: Optional list of player names to filter to (e.g. team roster).
+
+    Returns:
+        DataFrame with columns [Player, WAR, Trend] suitable for Streamlit display.
+    """
+    cols = ['Player', 'WAR', 'Trend']
+    if war_df is None or war_df.empty:
+        return pd.DataFrame(columns=cols)
+    if 'Name' not in war_df.columns or 'WAR' not in war_df.columns:
+        return pd.DataFrame(columns=cols)
+
+    df = war_df.copy()
+    if player_names:
+        lower_names = {n.lower().strip() for n in player_names}
+        df = df[df['Name'].str.lower().str.strip().isin(lower_names)]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    df = df.sort_values('WAR', ascending=False).reset_index(drop=True)
+    war_vals = df['WAR'].apply(coerce_float)
+    return pd.DataFrame({
+        'Player': df['Name'].astype(str),
+        'WAR': war_vals.round(1).astype(str),
+        'Trend': war_vals.apply(lambda w: stoplight(w - WAR_AVERAGE_STARTER, neutral_band=0.5)),
+    })
