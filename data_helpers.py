@@ -1840,9 +1840,10 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
                 try:
                     _wpb = float(wp_before)
                     _wpa = float(about['homeWinProbabilityAdded'])
-                    # homeWinProbability is 0-100%; homeWinProbabilityAdded may
-                    # be a small decimal (proportion) or already a percentage.
-                    # If WPA magnitude is < 1, treat as proportion and scale up.
+                    # MLB API: homeWinProbability is 0-100 (percentage),
+                    # homeWinProbabilityAdded is a proportion (-1 to 1).
+                    # Scale WPA to percentage points when its magnitude
+                    # indicates a proportion (< 1.0).
                     if abs(_wpa) < 1.0:
                         _wpa *= 100.0
                     wp_after_raw = _wpb + _wpa
@@ -1851,7 +1852,7 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
             wp_part = ''
             if wp_before is not None and wp_after_raw is not None:
                 wp_part = (f", flipping win expectancy from "
-                           f"{coerce_float(wp_before, 0):.0f}% to {wp_after_raw:.0f}%")
+                           f"{float(wp_before):.0f}% to {wp_after_raw:.0f}%")
 
             narrative = (
                 f"{half_word} of the {_ordinal(inning)}, "
