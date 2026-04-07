@@ -275,6 +275,12 @@ def render_spray_chart(statcast_df: pd.DataFrame,
         'Out': '#E74C3C',
         'Other': '#95A5A6',
     }
+
+    # Prepare optional columns for hover
+    for col in ('inning', 'pitcher_name', 'opponent', 'distance_source'):
+        if col not in df.columns:
+            df[col] = None
+
     for label in legend_order:
         subset = df[df['_label'] == label]
         if subset.empty:
@@ -282,10 +288,13 @@ def render_spray_chart(statcast_df: pd.DataFrame,
         color = label_color_map.get(label, _DEFAULT_EVENT_COLOR)
 
         hover_parts = ['<b>%{customdata[0]}</b>',
-                       'Result: %{customdata[1]}',
-                       'EV: %{customdata[2]} mph',
-                       'Dist: %{customdata[3]} ft',
-                       'Date: %{customdata[4]}',
+                       'Opponent: %{customdata[1]}',
+                       'Result: %{customdata[2]}',
+                       'EV: %{customdata[3]} mph',
+                       'Distance: %{customdata[4]} ft',
+                       'Inning: %{customdata[5]}',
+                       'Date: %{customdata[6]}',
+                       'Pitcher: %{customdata[7]}',
                        '<extra></extra>']
 
         def _fmt(col: pd.Series) -> pd.Series:
@@ -293,10 +302,13 @@ def render_spray_chart(statcast_df: pd.DataFrame,
 
         custom = np.column_stack([
             _fmt(subset['player_name']),
+            _fmt(subset['opponent'] if 'opponent' in subset.columns else pd.Series(['N/A'] * len(subset), index=subset.index)),
             _fmt(subset['events']),
             _fmt(subset['_ev'].round(1)),
             _fmt(subset['_dist'].round(0)),
+            _fmt(subset['inning'] if 'inning' in subset.columns else pd.Series(['N/A'] * len(subset), index=subset.index)),
             _fmt(subset['game_date']),
+            _fmt(subset['pitcher_name'] if 'pitcher_name' in subset.columns else pd.Series(['N/A'] * len(subset), index=subset.index)),
         ])
 
         fig.add_trace(go.Scatter(
@@ -646,3 +658,154 @@ def render_wildcard_standings_table(
         '</table>'
     )
     st.markdown(table_html, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Playoff bracket rendering
+# ---------------------------------------------------------------------------
+
+def render_playoff_bracket(seed_df: pd.DataFrame) -> None:
+    """Render playoff bracket using Streamlit columns and HTML cards."""
+    if seed_df is None or seed_df.empty:
+        st.info('Playoff bracket data is not available.')
+        return
+
+    def _team_card(row: pd.Series) -> str:
+        logo = row.get('logo_url', '')
+        name = str(row.get('team_name', ''))
+        seed = int(row.get('seed', 0))
+        wins = int(row.get('wins', 0))
+        losses = int(row.get('losses', 0))
+        wp = row.get('win_pct', 0.0)
+        logo_html = f'<img src="{logo}" width="24" style="vertical-align:middle;margin-right:6px">' if logo else ''
+        return (
+            f'<div style="border:1px solid #444;border-radius:6px;padding:8px 12px;margin:4px 0;'
+            f'background:#1e1e1e;display:flex;align-items:center;gap:8px">'
+            f'<span style="font-weight:bold;color:#FFD700;min-width:20px">#{seed}</span>'
+            f'{logo_html}'
+            f'<span style="flex:1">{name}</span>'
+            f'<span style="color:#aaa;font-size:0.85rem">{wins}-{losses} ({wp:.3f})</span>'
+            f'</div>'
+        )
+
+    for league in ('AL', 'NL'):
+        league_seeds = seed_df[seed_df['league'] == league].sort_values('seed')
+        if league_seeds.empty:
+            continue
+        league_label = 'American League' if league == 'AL' else 'National League'
+        st.markdown(f'#### {league_label} Bracket')
+
+        # Bye teams (seeds 1-2)
+        bye_teams = league_seeds[league_seeds['seed'] <= 2]
+        wc_teams = league_seeds[league_seeds['seed'] >= 3]
+
+        if not bye_teams.empty:
+            st.markdown('**Bye to Division Series:**')
+            for _, row in bye_teams.iterrows():
+                st.markdown(_team_card(row), unsafe_allow_html=True)
+
+        if not wc_teams.empty:
+            st.markdown('**Wild Card Round:**')
+            wc_list = list(wc_teams.iterrows())
+            if len(wc_list) >= 4:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f'**#{3} vs #{6}**')
+                    st.markdown(_team_card(wc_list[0][1]), unsafe_allow_html=True)
+                    st.markdown(_team_card(wc_list[3][1]), unsafe_allow_html=True)
+                with col2:
+                    st.markdown(f'**#{4} vs #{5}**')
+                    st.markdown(_team_card(wc_list[1][1]), unsafe_allow_html=True)
+                    st.markdown(_team_card(wc_list[2][1]), unsafe_allow_html=True)
+            else:
+                for _, row in wc_teams.iterrows():
+                    st.markdown(_team_card(row), unsafe_allow_html=True)
+
+        st.divider()
+
+
+# ---------------------------------------------------------------------------
+# Simulation result charts
+# ---------------------------------------------------------------------------
+
+def render_matchup_sim_results(sim_result: dict) -> None:
+    """Render single matchup simulation results."""
+    if not sim_result:
+        st.info('No simulation results available.')
+        return
+
+    a_name = sim_result.get('team_a_name', 'Team A')
+    b_name = sim_result.get('team_b_name', 'Team B')
+    a_pct = float(sim_result.get('team_a_win_pct', 50))
+    b_pct = float(sim_result.get('team_b_win_pct', 50))
+
+    render_win_probability_bar(a_pct, b_pct, a_name, b_name)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(f'{a_name} Win %', f'{a_pct:.1f}%')
+    with col2:
+        st.metric('Avg Series Length', f"{sim_result.get('avg_series_length', 'N/A')}")
+    with col3:
+        st.metric(f'{b_name} Win %', f'{b_pct:.1f}%')
+
+    # Game distribution
+    game_dist = sim_result.get('game_distribution', {})
+    if game_dist:
+        dist_df = pd.DataFrame({
+            'Games': list(game_dist.keys()),
+            'Frequency %': list(game_dist.values()),
+        })
+        fig = go.Figure(go.Bar(
+            x=dist_df['Games'],
+            y=dist_df['Frequency %'],
+            marker_color='#2196F3',
+            text=dist_df['Frequency %'].apply(lambda x: f'{x:.1f}%'),
+            textposition='outside',
+        ))
+        fig.update_layout(
+            title='Series Length Distribution',
+            height=300,
+            margin=dict(l=20, r=20, t=40, b=20),
+            xaxis_title='Games in Series',
+            yaxis_title='Frequency %',
+        )
+        st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+
+
+def render_full_bracket_sim_results(sim_df: pd.DataFrame) -> None:
+    """Render full bracket simulation results as a bar chart and table."""
+    if sim_df is None or sim_df.empty:
+        st.info('No bracket simulation results available.')
+        return
+
+    # Title odds bar chart
+    top_n = sim_df.head(12).copy()
+    fig = go.Figure(go.Bar(
+        x=top_n['ws_pct'],
+        y=top_n['team_name'],
+        orientation='h',
+        marker_color='#FFD700',
+        text=top_n['ws_pct'].apply(lambda x: f'{x:.1f}%'),
+        textposition='outside',
+    ))
+    fig.update_layout(
+        title='World Series Title Odds',
+        height=max(350, len(top_n) * 35),
+        margin=dict(l=20, r=40, t=40, b=20),
+        xaxis_title='Win %',
+        yaxis=dict(autorange='reversed'),
+    )
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+
+    # Full table
+    display_df = sim_df.rename(columns={
+        'team_name': 'Team',
+        'league': 'League',
+        'seed': 'Seed',
+        'wc_advance_pct': 'WC Adv %',
+        'ds_advance_pct': 'DS Adv %',
+        'pennant_pct': 'Pennant %',
+        'ws_pct': 'WS Win %',
+    })
+    st.dataframe(display_df.astype(str), use_container_width=True, hide_index=True)

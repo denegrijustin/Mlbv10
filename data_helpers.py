@@ -962,8 +962,10 @@ def build_spray_chart_last_30(statcast_batter_df: pd.DataFrame, days: int = 30) 
     """
     Filter statcast data to last `days` days and return spray chart coordinates.
     Converts hc_x/hc_y to centered baseball field coordinates.
+    Uses real hit_distance_sc when available; estimates distance from coordinates otherwise.
     """
-    cols_out = ['field_x', 'field_y', 'events', 'player_name', 'launch_speed', 'hit_distance_sc', 'game_date']
+    cols_out = ['field_x', 'field_y', 'events', 'player_name', 'launch_speed', 'hit_distance_sc',
+                'game_date', 'distance_source', 'inning', 'pitcher_name', 'opponent']
     if statcast_batter_df.empty:
         return pd.DataFrame(columns=cols_out)
 
@@ -994,10 +996,44 @@ def build_spray_chart_last_30(statcast_batter_df: pd.DataFrame, days: int = 30) 
     df['field_x'] = df['hc_x'] - 125.42
     df['field_y'] = 198.27 - df['hc_y']
 
+    # Distance: prefer Statcast hit_distance_sc, fallback to estimated from coordinates
+    if 'hit_distance_sc' in df.columns:
+        df['hit_distance_sc'] = pd.to_numeric(df['hit_distance_sc'], errors='coerce')
+        has_real = df['hit_distance_sc'].notna() & (df['hit_distance_sc'] > 0)
+        # Estimate from field coords for rows missing real distance
+        estimated = np.sqrt(df['field_x'] ** 2 + df['field_y'] ** 2) * 2.5
+        df.loc[~has_real, 'hit_distance_sc'] = estimated[~has_real].round(0)
+        df['distance_source'] = 'Statcast'
+        df.loc[~has_real, 'distance_source'] = 'Estimated'
+    else:
+        df['hit_distance_sc'] = (np.sqrt(df['field_x'] ** 2 + df['field_y'] ** 2) * 2.5).round(0)
+        df['distance_source'] = 'Estimated'
+
     # Fill optional columns
-    for col in ('events', 'launch_speed', 'hit_distance_sc'):
+    for col in ('events', 'launch_speed'):
         if col not in df.columns:
             df[col] = None
+
+    # Add inning and pitcher info for hover
+    df['inning'] = pd.to_numeric(df.get('inning', pd.Series(dtype=float)), errors='coerce') if 'inning' in df.columns else np.nan
+    df['pitcher_name'] = df['p_throws'].astype(str) if 'p_throws' in df.columns else ''
+    if 'pitcher' in df.columns:
+        df['pitcher_name'] = df['pitcher'].astype(str)
+    elif 'pitcher_name' in df.columns:
+        pass  # already set
+    else:
+        df['pitcher_name'] = ''
+
+    # Opponent
+    if 'opponent' in df.columns:
+        pass
+    elif 'home_team' in df.columns and 'away_team' in df.columns and 'inning_topbot' in df.columns:
+        df['opponent'] = df.apply(
+            lambda r: r.get('away_team', '') if str(r.get('inning_topbot', '')).lower() == 'bot'
+            else r.get('home_team', ''), axis=1
+        )
+    else:
+        df['opponent'] = ''
 
     df['game_date'] = df['game_date'].astype(str) if 'game_date' in df.columns else ''
 
@@ -1113,3 +1149,527 @@ def run_monte_carlo_matchup(
         'lambda_b': round(lambda_b, 4),
         'model_inputs_used': inputs_used,
     }
+
+
+# ---------------------------------------------------------------------------
+# Player of the Game
+# ---------------------------------------------------------------------------
+
+def _score_batter_potg(player: dict[str, Any]) -> float:
+    """Score a batter for Player of the Game from boxscore batting stats."""
+    stats = player.get('stats', {}).get('batting', {})
+    hr = coerce_int(stats.get('homeRuns'), 0)
+    triples = coerce_int(stats.get('triples'), 0)
+    doubles = coerce_int(stats.get('doubles'), 0)
+    hits = coerce_int(stats.get('hits'), 0)
+    singles = max(0, hits - hr - triples - doubles)
+    rbi = coerce_int(stats.get('rbi'), 0)
+    runs = coerce_int(stats.get('runs'), 0)
+    bb = coerce_int(stats.get('baseOnBalls'), 0)
+    hbp = coerce_int(stats.get('hitByPitch'), 0)
+    sb = coerce_int(stats.get('stolenBases'), 0)
+    score = (hr * 6.0 + triples * 4.0 + doubles * 3.0 + singles * 1.5
+             + rbi * 2.0 + runs * 1.5 + (bb + hbp) * 1.0 + sb * 1.5)
+    return round(score, 2)
+
+
+def _score_pitcher_potg(player: dict[str, Any], is_starter: bool = False) -> float:
+    """Score a pitcher for Player of the Game from boxscore pitching stats."""
+    stats = player.get('stats', {}).get('pitching', {})
+    ip_str = str(stats.get('inningsPitched', '0'))
+    try:
+        parts = ip_str.split('.')
+        ip = float(parts[0]) + float(parts[1]) / 3 if len(parts) > 1 else float(parts[0])
+    except (ValueError, IndexError):
+        ip = 0.0
+    k = coerce_int(stats.get('strikeOuts'), 0)
+    er = coerce_int(stats.get('earnedRuns'), 0)
+    h = coerce_int(stats.get('hits'), 0)
+    bb = coerce_int(stats.get('baseOnBalls'), 0)
+    score = ip * 3.0 + k * 2.0 - er * 4.0 - h * 0.5 - bb * 0.5
+    if is_starter and ip >= 6.0 and er <= 3:
+        score += 5.0  # quality start bonus
+    if not is_starter:
+        if ip >= 1.0 and er == 0:
+            score += 3.0  # clean relief bonus
+    return round(score, 2)
+
+
+def _format_batter_summary(player: dict[str, Any]) -> str:
+    stats = player.get('stats', {}).get('batting', {})
+    ab = coerce_int(stats.get('atBats'), 0)
+    h = coerce_int(stats.get('hits'), 0)
+    hr = coerce_int(stats.get('homeRuns'), 0)
+    rbi = coerce_int(stats.get('rbi'), 0)
+    parts = [f'{h}-{ab}']
+    if hr > 0:
+        parts.append(f'{hr} HR')
+    if rbi > 0:
+        parts.append(f'{rbi} RBI')
+    return ', '.join(parts)
+
+
+def _format_pitcher_summary(player: dict[str, Any]) -> str:
+    stats = player.get('stats', {}).get('pitching', {})
+    ip = stats.get('inningsPitched', '0')
+    k = coerce_int(stats.get('strikeOuts'), 0)
+    er = coerce_int(stats.get('earnedRuns'), 0)
+    h = coerce_int(stats.get('hits'), 0)
+    return f'{ip} IP, {k} K, {er} ER, {h} H'
+
+
+def build_player_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Identify the Player of the Game from live feed data.
+
+    Returns dict with keys: player_name, team, role_type, score, summary
+    or None if data is insufficient.
+    """
+    if not live_feed_data:
+        return None
+    live_data = live_feed_data.get('liveData', {})
+    boxscore = live_data.get('boxscore', {})
+    if not boxscore:
+        return None
+
+    game_data = live_feed_data.get('gameData', {})
+    teams_info = game_data.get('teams', {})
+    probable = game_data.get('probablePitchers', {})
+    away_starter_id = coerce_int((probable.get('away') or {}).get('id'), 0)
+    home_starter_id = coerce_int((probable.get('home') or {}).get('id'), 0)
+
+    candidates: list[dict[str, Any]] = []
+
+    for side in ('away', 'home'):
+        team_box = boxscore.get('teams', {}).get(side, {})
+        team_name = teams_info.get(side, {}).get('name', side.title())
+        players = team_box.get('players', {})
+
+        starters_list = []
+        first_pitcher_id = None
+        pitcher_order = team_box.get('pitchers', [])
+        if pitcher_order:
+            first_pitcher_id = pitcher_order[0] if pitcher_order else None
+
+        for pid_key, pdata in players.items():
+            pid = coerce_int(pdata.get('person', {}).get('id'), 0)
+            name = pdata.get('person', {}).get('fullName', 'Unknown')
+            position = pdata.get('position', {}).get('abbreviation', '')
+
+            # Batting stats
+            bat_stats = pdata.get('stats', {}).get('batting', {})
+            if bat_stats and coerce_int(bat_stats.get('atBats'), 0) > 0:
+                score = _score_batter_potg(pdata)
+                candidates.append({
+                    'player_name': name,
+                    'team': team_name,
+                    'role_type': 'Batter',
+                    'score': score,
+                    'summary': _format_batter_summary(pdata),
+                    '_player': pdata,
+                })
+
+            # Pitching stats
+            pit_stats = pdata.get('stats', {}).get('pitching', {})
+            if pit_stats and pit_stats.get('inningsPitched') is not None:
+                is_starter = False
+                if pid == away_starter_id or pid == home_starter_id:
+                    is_starter = True
+                elif first_pitcher_id and pid == first_pitcher_id:
+                    is_starter = True
+                role = 'Starter' if is_starter else 'Reliever'
+                score = _score_pitcher_potg(pdata, is_starter)
+                candidates.append({
+                    'player_name': name,
+                    'team': team_name,
+                    'role_type': role,
+                    'score': score,
+                    'summary': _format_pitcher_summary(pdata),
+                    '_player': pdata,
+                })
+
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda c: c['score'])
+    return {
+        'player_name': best['player_name'],
+        'team': best['team'],
+        'role_type': best['role_type'],
+        'score': best['score'],
+        'summary': best['summary'],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Play of the Game
+# ---------------------------------------------------------------------------
+
+def _calc_fallback_leverage(play: dict[str, Any], total_innings: int = 9) -> float:
+    """Calculate a fallback leverage score when win probability delta is unavailable."""
+    about = play.get('about', {})
+    inning = coerce_int(about.get('inning'), 1)
+    half = about.get('halfInning', 'top')
+    outs = coerce_int(about.get('outs'), 0)
+    result = play.get('result', {})
+    event = result.get('event', '')
+
+    # Score context
+    away_score = coerce_int(result.get('awayScore'), 0)
+    home_score = coerce_int(result.get('homeScore'), 0)
+    diff = abs(away_score - home_score)
+
+    # Runners context
+    runners = play.get('runners', [])
+    runners_on = len([r for r in runners if r.get('movement', {}).get('start')])
+
+    # RBI from the play
+    rbi = coerce_int(result.get('rbi'), 0)
+
+    # Inning factor: later innings are higher leverage
+    inning_factor = min(inning / total_innings, 1.5)
+
+    # Close game factor: close games are higher leverage
+    if diff <= 1:
+        close_factor = 2.0
+    elif diff <= 3:
+        close_factor = 1.2
+    else:
+        close_factor = 0.5
+
+    # Outs factor: more outs = higher leverage
+    out_factor = 1.0 + (outs * 0.3)
+
+    # Scoring impact
+    scoring_factor = rbi * 1.5 + (1.0 if event in ('home_run', 'triple', 'double') else 0.5)
+
+    # Runners on base factor
+    runner_factor = 1.0 + (runners_on * 0.3)
+
+    leverage = inning_factor * close_factor * out_factor * scoring_factor * runner_factor
+    return round(leverage, 3)
+
+
+def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Find the highest leverage play from a game's live feed data.
+
+    Returns dict with: inning, batter, pitcher, event, score_before, score_after,
+    leverage_score, win_prob_delta, description
+    or None if data is insufficient.
+    """
+    if not live_feed_data:
+        return None
+    live_data = live_feed_data.get('liveData', {})
+    all_plays = live_data.get('plays', {}).get('allPlays', [])
+    if not all_plays:
+        return None
+
+    best_play = None
+    best_score = -1.0
+
+    for play in all_plays:
+        result = play.get('result', {})
+        event = result.get('event', '')
+        if not event:
+            continue
+
+        about = play.get('about', {})
+        # Try win probability delta first
+        wp_delta = None
+        if 'homeWinProbabilityAdded' in about:
+            try:
+                wp_delta = abs(float(about['homeWinProbabilityAdded']))
+            except (TypeError, ValueError):
+                wp_delta = None
+
+        if wp_delta is not None:
+            leverage = wp_delta * 100
+        else:
+            leverage = _calc_fallback_leverage(play)
+
+        if leverage > best_score:
+            best_score = leverage
+            best_play = play
+
+    if best_play is None:
+        return None
+
+    about = best_play.get('about', {})
+    result = best_play.get('result', {})
+    matchup = best_play.get('matchup', {})
+
+    inning = coerce_int(about.get('inning'), 0)
+    half = about.get('halfInning', '')
+    inning_label = f"{'Top' if half == 'top' else 'Bot'} {inning}"
+
+    batter = matchup.get('batter', {}).get('fullName', 'Unknown')
+    pitcher = matchup.get('pitcher', {}).get('fullName', 'Unknown')
+
+    away_score = coerce_int(result.get('awayScore'), 0)
+    home_score = coerce_int(result.get('homeScore'), 0)
+
+    # Try to reconstruct score_before from play events
+    rbi = coerce_int(result.get('rbi'), 0)
+    description = result.get('description', '')
+
+    # Build human readable description
+    outs = coerce_int(about.get('outs'), 0)
+    event = result.get('event', '')
+
+    runners = best_play.get('runners', [])
+    runner_starts = [r.get('movement', {}).get('start', '') for r in runners if r.get('movement', {}).get('start')]
+    runner_desc = ''
+    if runner_starts:
+        bases = [s for s in runner_starts if s and s != 'null']
+        if bases:
+            runner_desc = f"runner(s) on {', '.join(bases)}"
+
+    parts = [f"{inning_label}"]
+    if outs > 0:
+        parts.append(f"{outs} out{'s' if outs > 1 else ''}")
+    if runner_desc:
+        parts.append(runner_desc)
+    if away_score == home_score:
+        parts.append("tie game")
+    parts.append(event.replace('_', ' '))
+    readable = ', '.join(parts)
+
+    return {
+        'inning': inning,
+        'inning_label': inning_label,
+        'batter': batter,
+        'pitcher': pitcher,
+        'event': event,
+        'score_before': f"{away_score}-{home_score}",
+        'score_after': f"{away_score}-{home_score}",
+        'leverage_score': round(best_score, 2),
+        'win_prob_delta': about.get('homeWinProbabilityAdded'),
+        'description': readable,
+        'full_description': description,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Playoff simulation helpers
+# ---------------------------------------------------------------------------
+
+_PLAYOFF_WEIGHTS = {
+    'win_pct': 0.40,
+    'run_diff': 0.25,
+    'recent_form': 0.20,
+    'home_field': 0.10,
+    'head_to_head': 0.05,
+}
+
+
+def _matchup_win_prob(team_a: dict[str, Any], team_b: dict[str, Any],
+                      home_team_name: str | None = None) -> float:
+    """Estimate single-game win probability for team_a vs team_b.
+
+    Uses weighted blend of season win_pct, run_diff, recent form, and home field.
+    Returns probability that team_a wins (0.0-1.0).
+    """
+    wp_a = coerce_float(team_a.get('win_pct', 0.5), 0.5)
+    wp_b = coerce_float(team_b.get('win_pct', 0.5), 0.5)
+    rd_a = coerce_float(team_a.get('run_diff_per_game', 0.0), 0.0)
+    rd_b = coerce_float(team_b.get('run_diff_per_game', 0.0), 0.0)
+
+    # Win pct component (log5 method)
+    if wp_a + wp_b > 0:
+        log5 = (wp_a * (1 - wp_b)) / (wp_a * (1 - wp_b) + wp_b * (1 - wp_a)) if wp_a * (1 - wp_b) + wp_b * (1 - wp_a) > 0 else 0.5
+    else:
+        log5 = 0.5
+
+    # Run differential component
+    rd_diff = rd_a - rd_b
+    rd_prob = 1 / (1 + 10 ** (-rd_diff / 3.0))
+
+    # Recent form (win pct used as proxy)
+    recent_prob = log5
+
+    # Home field
+    hfa = 0.0
+    if home_team_name:
+        if home_team_name == team_a.get('team_name', ''):
+            hfa = 0.04
+        elif home_team_name == team_b.get('team_name', ''):
+            hfa = -0.04
+
+    w = _PLAYOFF_WEIGHTS
+    base_prob = (
+        w['win_pct'] * log5
+        + w['run_diff'] * rd_prob
+        + w['recent_form'] * recent_prob
+        + w['head_to_head'] * 0.5  # neutral since h2h not readily available
+    )
+    prob = base_prob + w['home_field'] * (0.5 + hfa)
+    return float(min(max(prob, 0.05), 0.95))
+
+
+def simulate_playoff_matchup(
+    team_a: dict[str, Any],
+    team_b: dict[str, Any],
+    n_sims: int = 1000,
+    series_length: int = 7,
+    home_team_name: str | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Simulate a playoff series between two teams.
+
+    team_a/team_b: dicts with win_pct, run_diff_per_game, team_name
+    series_length: 3, 5, or 7
+    Returns: team_a_wins_pct, team_b_wins_pct, avg_series_length, game_distribution
+    """
+    wins_needed = (series_length // 2) + 1
+    prob_a = _matchup_win_prob(team_a, team_b, home_team_name)
+
+    rng = np.random.default_rng(seed=seed)
+    a_series_wins = 0
+    length_counts: dict[int, int] = {i: 0 for i in range(wins_needed, series_length + 1)}
+    total_games = 0
+
+    for _ in range(n_sims):
+        a_wins = 0
+        b_wins = 0
+        games = 0
+        while a_wins < wins_needed and b_wins < wins_needed:
+            games += 1
+            if rng.random() < prob_a:
+                a_wins += 1
+            else:
+                b_wins += 1
+        if a_wins >= wins_needed:
+            a_series_wins += 1
+        total_games += games
+        if games in length_counts:
+            length_counts[games] += 1
+
+    a_pct = round(a_series_wins / n_sims * 100, 1)
+    b_pct = round((n_sims - a_series_wins) / n_sims * 100, 1)
+    avg_len = round(total_games / n_sims, 1)
+
+    game_dist = {str(k): round(v / n_sims * 100, 1) for k, v in sorted(length_counts.items())}
+
+    return {
+        'team_a_name': team_a.get('team_name', 'Team A'),
+        'team_b_name': team_b.get('team_name', 'Team B'),
+        'team_a_win_pct': a_pct,
+        'team_b_win_pct': b_pct,
+        'avg_series_length': avg_len,
+        'game_distribution': game_dist,
+        'n_sims': n_sims,
+        'series_length': series_length,
+        'model_win_prob': round(prob_a, 4),
+    }
+
+
+def simulate_full_playoff_bracket(
+    seed_df: pd.DataFrame,
+    n_sims: int = 1000,
+    seed: int | None = None,
+) -> pd.DataFrame:
+    """Simulate the full MLB playoff bracket N times.
+
+    seed_df: from build_playoff_seeds() with columns league, seed, team_name, win_pct, etc.
+    Returns DataFrame with columns: team_name, league, seed, wc_advance_pct,
+        ds_advance_pct, pennant_pct, ws_pct
+    """
+    _cols = ['team_name', 'league', 'seed', 'wc_advance_pct', 'ds_advance_pct',
+             'pennant_pct', 'ws_pct']
+    if seed_df.empty:
+        return pd.DataFrame(columns=_cols)
+
+    rng = np.random.default_rng(seed=seed)
+
+    # Build team lookup
+    teams: dict[str, dict[str, Any]] = {}
+    for _, row in seed_df.iterrows():
+        teams[f"{row['league']}_{row['seed']}"] = row.to_dict()
+
+    # Counters
+    counters: dict[str, dict[str, int]] = {}
+    for key in teams:
+        counters[key] = {'wc_advance': 0, 'ds_advance': 0, 'pennant': 0, 'ws': 0}
+
+    def _sim_series(t_a: dict, t_b: dict, wins_needed: int) -> dict:
+        p = _matchup_win_prob(t_a, t_b, t_a.get('team_name'))
+        a_w, b_w = 0, 0
+        while a_w < wins_needed and b_w < wins_needed:
+            if rng.random() < p:
+                a_w += 1
+            else:
+                b_w += 1
+        return t_a if a_w >= wins_needed else t_b
+
+    for _ in range(n_sims):
+        league_champs = {}
+        for league in ('AL', 'NL'):
+            s1 = teams.get(f'{league}_1')
+            s2 = teams.get(f'{league}_2')
+            s3 = teams.get(f'{league}_3')
+            s4 = teams.get(f'{league}_4')
+            s5 = teams.get(f'{league}_5')
+            s6 = teams.get(f'{league}_6')
+
+            if not all([s1, s2, s3, s4, s5, s6]):
+                continue
+
+            # Wild Card Round (best of 3): 4v5, 3v6
+            wc_winner_45 = _sim_series(s4, s5, 2)
+            wc_winner_36 = _sim_series(s3, s6, 2)
+
+            # Track WC advancement
+            for s in [s4, s5]:
+                k = f"{league}_{s['seed']}"
+                if s is wc_winner_45 or s == wc_winner_45:
+                    counters[k]['wc_advance'] += 1
+            for s in [s3, s6]:
+                k = f"{league}_{s['seed']}"
+                if s is wc_winner_36 or s == wc_winner_36:
+                    counters[k]['wc_advance'] += 1
+
+            # Seeds 1 and 2 get byes (auto-advance through WC)
+            counters[f'{league}_1']['wc_advance'] += 1
+            counters[f'{league}_2']['wc_advance'] += 1
+
+            # Division Series (best of 5): 1 vs wc_winner_45, 2 vs wc_winner_36
+            ds_winner_1 = _sim_series(s1, wc_winner_45, 3)
+            ds_winner_2 = _sim_series(s2, wc_winner_36, 3)
+
+            for t in [s1, wc_winner_45]:
+                k = f"{league}_{t['seed']}"
+                if t is ds_winner_1 or t == ds_winner_1:
+                    counters[k]['ds_advance'] += 1
+            for t in [s2, wc_winner_36]:
+                k = f"{league}_{t['seed']}"
+                if t is ds_winner_2 or t == ds_winner_2:
+                    counters[k]['ds_advance'] += 1
+
+            # League Championship Series (best of 7)
+            lcs_winner = _sim_series(ds_winner_1, ds_winner_2, 4)
+            k_lcs = f"{league}_{lcs_winner['seed']}"
+            counters[k_lcs]['pennant'] += 1
+            league_champs[league] = lcs_winner
+
+        # World Series (best of 7)
+        al_champ = league_champs.get('AL')
+        nl_champ = league_champs.get('NL')
+        if al_champ and nl_champ:
+            ws_winner = _sim_series(al_champ, nl_champ, 4)
+            k_ws = f"{ws_winner['league']}_{ws_winner['seed']}"
+            counters[k_ws]['ws'] += 1
+
+    rows = []
+    for key, team in teams.items():
+        c = counters[key]
+        rows.append({
+            'team_name': team['team_name'],
+            'league': team['league'],
+            'seed': team['seed'],
+            'wc_advance_pct': round(c['wc_advance'] / n_sims * 100, 1),
+            'ds_advance_pct': round(c['ds_advance'] / n_sims * 100, 1),
+            'pennant_pct': round(c['pennant'] / n_sims * 100, 1),
+            'ws_pct': round(c['ws'] / n_sims * 100, 1),
+        })
+
+    result = pd.DataFrame(rows)[_cols].sort_values('ws_pct', ascending=False).reset_index(drop=True)
+    return result

@@ -12,6 +12,8 @@ from mlb_api import (
     get_division_standings, get_wildcard_standings_league,
     get_upcoming_schedule, get_statcast_team_df,
     choose_live_game_pk, get_live_summary, get_wildcard_standings_combined,
+    get_live_feed_full, get_boxscore_data, build_playoff_seeds,
+    get_completed_game_pk,
 )
 from data_helpers import (
     safe_team_row, build_team_snapshot, build_summary_df, build_trend_df,
@@ -25,6 +27,8 @@ from data_helpers import (
     get_team_trend_snapshot, compare_teams,
     get_home_run_distance_summary, build_spray_chart_last_30,
     run_monte_carlo_matchup,
+    build_player_of_game, build_play_of_game,
+    simulate_playoff_matchup, simulate_full_playoff_bracket,
 )
 from charts import (
     render_recent_trend_chart, render_run_diff_chart,
@@ -32,6 +36,8 @@ from charts import (
     render_statcast_scatter, render_spray_chart,
     render_monte_carlo_results, render_division_standings_table,
     render_wildcard_standings_table,
+    render_playoff_bracket, render_matchup_sim_results,
+    render_full_bracket_sim_results,
 )
 from formatting import coerce_float, coerce_int, format_record
 
@@ -93,6 +99,16 @@ def _cached_get_upcoming_schedule(team_id: int, from_date: str, n_games: int = 1
 @st.cache_data(ttl=3600)
 def _cached_get_statcast(team_abbr: str, start_date: str, end_date: str, player_type: str = 'batter'):
     return get_statcast_team_df(team_abbr, start_date, end_date, player_type)
+
+
+@st.cache_data(ttl=1800)
+def _cached_build_playoff_seeds(season: int):
+    return build_playoff_seeds(season)
+
+
+def _cached_get_live_feed(game_pk: int | None):
+    """No caching — live feed data should always be fresh."""
+    return get_live_feed_full(game_pk)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +188,7 @@ with header_cols[6]:
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_summary, tab_standings, tab_opponents, tab_players, tab_hr, tab_spray, tab_compare, tab_live = st.tabs([
+tab_summary, tab_standings, tab_opponents, tab_players, tab_hr, tab_spray, tab_compare, tab_bracket, tab_live = st.tabs([
     '📊 Summary',
     '🏆 Standings',
     '📅 Next Opponents',
@@ -180,6 +196,7 @@ tab_summary, tab_standings, tab_opponents, tab_players, tab_hr, tab_spray, tab_c
     '💣 HR Tracker',
     '🎯 Spray Chart',
     '⚔️ Team Compare',
+    '🏅 Playoff Bracket',
     '📡 Live Feed',
 ])
 
@@ -195,6 +212,47 @@ with tab_summary:
             st.warning(f'Daily schedule: {daily_err}')
         if teams_err:
             st.warning(f'Teams: {teams_err}')
+
+    # --- Player of the Game & Play of the Game cards ---
+    game_pk_for_potg = choose_live_game_pk(daily_df) or get_completed_game_pk(daily_df)
+    if game_pk_for_potg:
+        live_feed_data, lf_err = _cached_get_live_feed(game_pk_for_potg)
+        if debug_mode and lf_err:
+            st.warning(f'Live feed for POTG: {lf_err}')
+
+        potg = build_player_of_game(live_feed_data) if live_feed_data else None
+        plotg = build_play_of_game(live_feed_data) if live_feed_data else None
+
+        potg_col, plotg_col = st.columns(2)
+        with potg_col:
+            with st.container(border=True):
+                if potg:
+                    st.markdown(f"⭐ **Player of the Game**")
+                    st.markdown(f"**{potg['player_name']}** ({potg['team']}) — {potg['role_type']}")
+                    st.caption(potg['summary'])
+                else:
+                    st.markdown('⭐ **Player of the Game**')
+                    st.caption('Data not yet available for today\'s game.')
+
+        with plotg_col:
+            with st.container(border=True):
+                if plotg:
+                    st.markdown(f"🔥 **Play of the Game**")
+                    st.markdown(f"**{plotg['description']}**")
+                    st.caption(f"{plotg['batter']} vs {plotg['pitcher']} | Leverage: {plotg['leverage_score']}")
+                else:
+                    st.markdown('🔥 **Play of the Game**')
+                    st.caption('Data not yet available for today\'s game.')
+    else:
+        potg_col, plotg_col = st.columns(2)
+        with potg_col:
+            with st.container(border=True):
+                st.markdown('⭐ **Player of the Game**')
+                st.caption('No game data available today.')
+        with plotg_col:
+            with st.container(border=True):
+                st.markdown('🔥 **Play of the Game**')
+                st.caption('No game data available today.')
 
     trend_df = build_trend_df(season_df, selected_team_name)
     recent_df = build_recent_games_df(season_df, selected_team_name, 10)
@@ -561,7 +619,77 @@ with tab_compare:
             render_monte_carlo_results(mc_result, team_a_meta_cmp, team_b_meta_cmp)
 
 # ===========================================================================
-# TAB 8: Live Feed
+# TAB 8: Playoff Bracket
+# ===========================================================================
+
+with tab_bracket:
+    st.markdown('### 🏅 Playoff Bracket')
+    st.caption('If the season ended today — projected playoff field based on current standings.')
+
+    with st.spinner('Loading playoff seeds...'):
+        seed_df, seed_err = _cached_build_playoff_seeds(CURRENT_SEASON)
+
+    if debug_mode and seed_err:
+        st.warning(f'Playoff seeds: {seed_err}')
+
+    if seed_df.empty:
+        st.info('Playoff bracket data is not available. Standings data may not be loaded yet.')
+    else:
+        al_col, nl_col = st.columns(2)
+        with al_col:
+            al_seeds = seed_df[seed_df['league'] == 'AL']
+            render_playoff_bracket(al_seeds)
+        with nl_col:
+            nl_seeds = seed_df[seed_df['league'] == 'NL']
+            render_playoff_bracket(nl_seeds)
+
+        st.caption(f'Data timestamp: {date.today().isoformat()}')
+
+        st.divider()
+        st.markdown('### 🎲 Playoff Simulation')
+
+        sim_tab_matchup, sim_tab_full = st.tabs(['⚔️ Matchup Sim', '🏆 Full Bracket Sim'])
+
+        with sim_tab_matchup:
+            bracket_team_names = seed_df['team_name'].tolist()
+            if len(bracket_team_names) >= 2:
+                m_col1, m_col2, m_col3 = st.columns([2, 2, 1])
+                with m_col1:
+                    matchup_a = st.selectbox('Team A', bracket_team_names, index=0, key='bracket_matchup_a')
+                with m_col2:
+                    default_b = 1 if len(bracket_team_names) > 1 else 0
+                    matchup_b = st.selectbox('Team B', bracket_team_names, index=default_b, key='bracket_matchup_b')
+                with m_col3:
+                    series_format = st.selectbox('Series Format', [3, 5, 7], index=2, key='bracket_series_fmt')
+                    matchup_iters = st.select_slider('Iterations', options=[100, 500, 1000, 5000], value=1000, key='bracket_matchup_iters')
+
+                if st.button('Run Matchup Sim ▶', key='btn_matchup_sim', use_container_width=True):
+                    team_a_row = seed_df[seed_df['team_name'] == matchup_a].iloc[0].to_dict() if matchup_a in seed_df['team_name'].values else {}
+                    team_b_row = seed_df[seed_df['team_name'] == matchup_b].iloc[0].to_dict() if matchup_b in seed_df['team_name'].values else {}
+
+                    if team_a_row and team_b_row:
+                        with st.spinner(f'Simulating {matchup_iters:,} series...'):
+                            matchup_result = simulate_playoff_matchup(
+                                team_a_row, team_b_row,
+                                n_sims=matchup_iters,
+                                series_length=series_format,
+                                home_team_name=team_a_row.get('team_name'),
+                            )
+                        render_matchup_sim_results(matchup_result)
+                    else:
+                        st.warning('Could not find team data for simulation.')
+            else:
+                st.info('Not enough teams in the bracket for a matchup simulation.')
+
+        with sim_tab_full:
+            full_iters = st.select_slider('Iterations', options=[100, 500, 1000, 5000], value=1000, key='full_bracket_iters')
+            if st.button('Run Full Playoff Simulation ▶', key='btn_full_bracket_sim', use_container_width=True):
+                with st.spinner(f'Simulating {full_iters:,} full brackets...'):
+                    bracket_result = simulate_full_playoff_bracket(seed_df, n_sims=full_iters)
+                render_full_bracket_sim_results(bracket_result)
+
+# ===========================================================================
+# TAB 9: Live Feed
 # ===========================================================================
 
 with tab_live:
