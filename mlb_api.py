@@ -700,3 +700,208 @@ def get_completed_game_pk(schedule_df: pd.DataFrame) -> int | None:
     if finals.empty:
         return None
     return coerce_int(finals.iloc[-1].get('gamePk'), 0) or None
+
+
+# ---------------------------------------------------------------------------
+# Live scorecard helpers
+# ---------------------------------------------------------------------------
+
+def get_game_status(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
+    """Return game status info: abstractGameState, detailedState, statusCode."""
+    if not game_pk:
+        return {}, None
+    client = MLBClient()
+    try:
+        data = client.get_live_feed(game_pk)
+        gd = data.get('gameData', {})
+        status = gd.get('status', {})
+        return {
+            'abstractGameState': status.get('abstractGameState', ''),
+            'detailedState': status.get('detailedState', ''),
+            'statusCode': status.get('statusCode', ''),
+            'startTimeTBD': status.get('startTimeTBD', False),
+        }, None
+    except Exception as exc:
+        return {}, str(exc)
+
+
+def get_live_scorecard(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
+    """Return a structured scorecard dict parsed from the live feed linescore.
+
+    Returns a dict with keys:
+        gamePk, game_date, venue, status, detailed_status,
+        away_team, away_id, away_abbr, away_logo, away_record,
+        home_team, home_id, home_abbr, home_logo, home_record,
+        innings (list of {inning, away_runs, home_runs}),
+        away_runs, home_runs, away_hits, home_hits, away_errors, home_errors,
+        current_inning, inning_state, inning_ordinal,
+        balls, strikes, outs,
+        runners (dict with first, second, third booleans),
+        last_play, scoring_plays
+    """
+    if not game_pk:
+        return {}, None
+    client = MLBClient()
+    try:
+        data = client.get_live_feed(game_pk)
+    except Exception as exc:
+        return {}, str(exc)
+
+    gd = data.get('gameData', {})
+    ld = data.get('liveData', {})
+    linescore = ld.get('linescore', {})
+    status = gd.get('status', {})
+    teams = gd.get('teams', {})
+    venue_info = gd.get('venue', {})
+    datetime_info = gd.get('datetime', {})
+
+    away = teams.get('away', {})
+    home = teams.get('home', {})
+    away_rec = away.get('record', {})
+    home_rec = home.get('record', {})
+    away_id = coerce_int(away.get('id'), 0)
+    home_id = coerce_int(home.get('id'), 0)
+    away_meta = TEAM_META.get(away_id, {})
+    home_meta = TEAM_META.get(home_id, {})
+
+    # Parse innings from linescore
+    innings_data = linescore.get('innings', [])
+    innings = []
+    for inn in innings_data:
+        innings.append({
+            'inning': coerce_int(inn.get('num'), 0),
+            'away_runs': coerce_int(inn.get('away', {}).get('runs'), None),
+            'home_runs': coerce_int(inn.get('home', {}).get('runs'), None),
+        })
+
+    ls_teams = linescore.get('teams', {})
+    ls_away = ls_teams.get('away', {})
+    ls_home = ls_teams.get('home', {})
+
+    # Defense / offense for runners
+    defense = linescore.get('defense', {})
+    offense = linescore.get('offense', {})
+
+    runners = {
+        'first': bool(offense.get('first')),
+        'second': bool(offense.get('second')),
+        'third': bool(offense.get('third')),
+    }
+
+    # Last play
+    plays = ld.get('plays', {})
+    current_play = plays.get('currentPlay', {})
+    last_play_desc = ''
+    if current_play:
+        last_play_desc = current_play.get('result', {}).get('description', '')
+
+    # Scoring plays
+    scoring_play_indices = plays.get('scoringPlays', [])
+    all_plays = plays.get('allPlays', [])
+    scoring_plays = []
+    for idx in scoring_play_indices:
+        if 0 <= idx < len(all_plays):
+            sp = all_plays[idx]
+            sp_about = sp.get('about', {})
+            sp_result = sp.get('result', {})
+            scoring_plays.append({
+                'inning': coerce_int(sp_about.get('inning'), 0),
+                'halfInning': sp_about.get('halfInning', ''),
+                'description': sp_result.get('description', ''),
+                'event': sp_result.get('event', ''),
+                'awayScore': coerce_int(sp_result.get('awayScore'), 0),
+                'homeScore': coerce_int(sp_result.get('homeScore'), 0),
+            })
+
+    abstract_state = status.get('abstractGameState', '')
+    detailed_state = status.get('detailedState', '')
+
+    # Extract game date with fallback
+    raw_dt = datetime_info.get('dateTime', '')
+    fallback_date = raw_dt[:10] if raw_dt else ''
+    game_date = datetime_info.get('officialDate', fallback_date)
+
+    scorecard = {
+        'gamePk': game_pk,
+        'game_date': game_date,
+        'venue': venue_info.get('name', ''),
+        'status': abstract_state,
+        'detailed_status': detailed_state,
+        'away_team': away.get('name', ''),
+        'away_id': away_id,
+        'away_abbr': away_meta.get('abbreviation', away.get('abbreviation', '')),
+        'away_logo': away_meta.get('logo_url', ''),
+        'away_record': f"{coerce_int(away_rec.get('wins'), 0)}-{coerce_int(away_rec.get('losses'), 0)}",
+        'home_team': home.get('name', ''),
+        'home_id': home_id,
+        'home_abbr': home_meta.get('abbreviation', home.get('abbreviation', '')),
+        'home_logo': home_meta.get('logo_url', ''),
+        'home_record': f"{coerce_int(home_rec.get('wins'), 0)}-{coerce_int(home_rec.get('losses'), 0)}",
+        'innings': innings,
+        'away_runs': coerce_int(ls_away.get('runs'), 0),
+        'home_runs': coerce_int(ls_home.get('runs'), 0),
+        'away_hits': coerce_int(ls_away.get('hits'), 0),
+        'home_hits': coerce_int(ls_home.get('hits'), 0),
+        'away_errors': coerce_int(ls_away.get('errors'), 0),
+        'home_errors': coerce_int(ls_home.get('errors'), 0),
+        'current_inning': coerce_int(linescore.get('currentInning'), 0),
+        'inning_state': linescore.get('inningState', ''),
+        'inning_ordinal': linescore.get('currentInningOrdinal', ''),
+        'balls': coerce_int(linescore.get('balls'), 0),
+        'strikes': coerce_int(linescore.get('strikes'), 0),
+        'outs': coerce_int(linescore.get('outs'), 0),
+        'runners': runners,
+        'last_play': last_play_desc,
+        'scoring_plays': scoring_plays,
+    }
+    return scorecard, None
+
+
+def get_game_plays(game_pk: int | None) -> tuple[list[dict[str, Any]], str | None]:
+    """Return all plays from a game's live feed."""
+    if not game_pk:
+        return [], None
+    client = MLBClient()
+    try:
+        data = client.get_live_feed(game_pk)
+        all_plays = data.get('liveData', {}).get('plays', {}).get('allPlays', [])
+        return all_plays, None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def get_current_team_game(team_id: int, target_date: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    """Find the current or most recent game for a team on a given date.
+
+    Returns a dict with gamePk, status, abstract_status, away, home, etc.
+    Preference order: Live > Pre-Game/Scheduled > Final (most recent).
+    """
+    from datetime import date as dt_date
+    if target_date is None:
+        target_date = dt_date.today().isoformat()
+    try:
+        schedule_df, err = build_schedule_df(team_id, target_date)
+        if schedule_df.empty:
+            return None, err
+        # Prefer live games
+        live_statuses = {'In Progress', 'Manager Challenge', 'Delayed Start', 'Delayed', 'Suspended'}
+        live = schedule_df[schedule_df['status'].isin(live_statuses)]
+        if not live.empty:
+            row = live.iloc[0]
+            return row.to_dict(), None
+        # Then pre-game
+        pre_statuses = {'Pre-Game', 'Warmup', 'Scheduled'}
+        pre = schedule_df[schedule_df['status'].isin(pre_statuses)]
+        if not pre.empty:
+            row = pre.iloc[0]
+            return row.to_dict(), None
+        # Then final
+        final = schedule_df[schedule_df['abstract_status'] == 'Final']
+        if not final.empty:
+            row = final.iloc[-1]
+            return row.to_dict(), None
+        # Fallback: first game
+        row = schedule_df.iloc[0]
+        return row.to_dict(), None
+    except Exception as exc:
+        return None, str(exc)
