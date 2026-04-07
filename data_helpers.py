@@ -1457,7 +1457,7 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 _FROZEN_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.frozen_states')
 
@@ -1478,7 +1478,9 @@ def load_frozen_game_state(team_id: int) -> dict[str, Any] | None:
     try:
         with open(path, 'r') as f:
             return json.load(f)
-    except Exception:
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning('Failed to load frozen state for team %s: %s', team_id, exc)
         return None
 
 
@@ -1489,8 +1491,9 @@ def save_frozen_game_state(team_id: int, snapshot: dict[str, Any]) -> None:
     try:
         with open(path, 'w') as f:
             json.dump(snapshot, f, indent=2, default=str)
-    except Exception:
-        pass  # fail silently — app continues without persistence
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning('Failed to save frozen state for team %s: %s', team_id, exc)
 
 
 def should_replace_frozen_state(old_snapshot: dict[str, Any] | None,
@@ -1528,7 +1531,7 @@ def build_frozen_snapshot(team_id: int, game_pk: int, game_date: str,
         'scorecard': scorecard,
         'player_of_game': player_of_game,
         'play_of_game': play_of_game,
-        'frozen_at': datetime.utcnow().isoformat(),
+        'frozen_at': datetime.now(timezone.utc).isoformat(),
     }
 
 

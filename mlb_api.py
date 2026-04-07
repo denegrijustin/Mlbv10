@@ -816,9 +816,14 @@ def get_live_scorecard(game_pk: int | None) -> tuple[dict[str, Any], str | None]
     abstract_state = status.get('abstractGameState', '')
     detailed_state = status.get('detailedState', '')
 
+    # Extract game date with fallback
+    raw_dt = datetime_info.get('dateTime', '')
+    fallback_date = raw_dt[:10] if raw_dt else ''
+    game_date = datetime_info.get('officialDate', fallback_date)
+
     scorecard = {
         'gamePk': game_pk,
-        'game_date': datetime_info.get('officialDate', datetime_info.get('dateTime', '')[:10] if datetime_info.get('dateTime') else ''),
+        'game_date': game_date,
         'venue': venue_info.get('name', ''),
         'status': abstract_state,
         'detailed_status': detailed_state,

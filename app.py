@@ -740,12 +740,16 @@ with tab_live:
         if live_feed_data:
             try:
                 potg = build_player_of_game(live_feed_data)
-            except Exception:
+            except Exception as exc:
                 potg = None
+                if debug_mode:
+                    st.warning(f'POTG computation error: {exc}')
             try:
                 plotg = build_play_of_game(live_feed_data)
-            except Exception:
+            except Exception as exc:
                 plotg = None
+                if debug_mode:
+                    st.warning(f'PLOTG computation error: {exc}')
 
     # ---- Frozen state logic ----
     frozen = load_frozen_game_state(selected_team_id)
@@ -879,10 +883,13 @@ with tab_live:
             st.caption('No live, final, or pregame data found for today.')
 
     # ---- Auto-refresh for live games ----
+    # NOTE: time.sleep + st.rerun is the standard Streamlit auto-refresh pattern.
+    # The page renders fully first, then sleeps before triggering a rerun.
+    # User can interact with the rendered page during the sleep window.
     if game_state == 'live':
-        refresh_interval = 30  # seconds
-        st.caption(f'🔄 Auto-refreshing every {refresh_interval}s during live games.')
-        time.sleep(refresh_interval)
+        _LIVE_REFRESH_SECONDS = 30
+        st.caption(f'🔄 Auto-refreshing every {_LIVE_REFRESH_SECONDS}s during live games.')
+        time.sleep(_LIVE_REFRESH_SECONDS)
         st.rerun()
 
 # ---------------------------------------------------------------------------
