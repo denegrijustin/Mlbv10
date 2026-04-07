@@ -1016,12 +1016,9 @@ def build_spray_chart_last_30(statcast_batter_df: pd.DataFrame, days: int = 30) 
 
     # Add inning and pitcher info for hover
     df['inning'] = pd.to_numeric(df.get('inning', pd.Series(dtype=float)), errors='coerce') if 'inning' in df.columns else np.nan
-    df['pitcher_name'] = df['p_throws'].astype(str) if 'p_throws' in df.columns else ''
     if 'pitcher' in df.columns:
         df['pitcher_name'] = df['pitcher'].astype(str)
-    elif 'pitcher_name' in df.columns:
-        pass  # already set
-    else:
+    elif 'pitcher_name' not in df.columns:
         df['pitcher_name'] = ''
 
     # Opponent
@@ -1407,9 +1404,15 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
     away_score = coerce_int(result.get('awayScore'), 0)
     home_score = coerce_int(result.get('homeScore'), 0)
 
-    # Try to reconstruct score_before from play events
     rbi = coerce_int(result.get('rbi'), 0)
     description = result.get('description', '')
+
+    # Reconstruct score_before by subtracting RBI from the batting team's score
+    if half == 'top':
+        score_before = f"{away_score - rbi}-{home_score}"
+    else:
+        score_before = f"{away_score}-{home_score - rbi}"
+    score_after = f"{away_score}-{home_score}"
 
     # Build human readable description
     outs = coerce_int(about.get('outs'), 0)
@@ -1439,8 +1442,8 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
         'batter': batter,
         'pitcher': pitcher,
         'event': event,
-        'score_before': f"{away_score}-{home_score}",
-        'score_after': f"{away_score}-{home_score}",
+        'score_before': score_before,
+        'score_after': score_after,
         'leverage_score': round(best_score, 2),
         'win_prob_delta': about.get('homeWinProbabilityAdded'),
         'description': readable,
@@ -1475,7 +1478,8 @@ def _matchup_win_prob(team_a: dict[str, Any], team_b: dict[str, Any],
 
     # Win pct component (log5 method)
     if wp_a + wp_b > 0:
-        log5 = (wp_a * (1 - wp_b)) / (wp_a * (1 - wp_b) + wp_b * (1 - wp_a)) if wp_a * (1 - wp_b) + wp_b * (1 - wp_a) > 0 else 0.5
+        denom = wp_a * (1 - wp_b) + wp_b * (1 - wp_a)
+        log5 = (wp_a * (1 - wp_b)) / denom if denom > 0 else 0.5
     else:
         log5 = 0.5
 
@@ -1620,11 +1624,11 @@ def simulate_full_playoff_bracket(
             # Track WC advancement
             for s in [s4, s5]:
                 k = f"{league}_{s['seed']}"
-                if s is wc_winner_45 or s == wc_winner_45:
+                if s == wc_winner_45:
                     counters[k]['wc_advance'] += 1
             for s in [s3, s6]:
                 k = f"{league}_{s['seed']}"
-                if s is wc_winner_36 or s == wc_winner_36:
+                if s == wc_winner_36:
                     counters[k]['wc_advance'] += 1
 
             # Seeds 1 and 2 get byes (auto-advance through WC)
@@ -1637,11 +1641,11 @@ def simulate_full_playoff_bracket(
 
             for t in [s1, wc_winner_45]:
                 k = f"{league}_{t['seed']}"
-                if t is ds_winner_1 or t == ds_winner_1:
+                if t == ds_winner_1:
                     counters[k]['ds_advance'] += 1
             for t in [s2, wc_winner_36]:
                 k = f"{league}_{t['seed']}"
-                if t is ds_winner_2 or t == ds_winner_2:
+                if t == ds_winner_2:
                     counters[k]['ds_advance'] += 1
 
             # League Championship Series (best of 7)

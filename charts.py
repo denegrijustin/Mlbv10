@@ -302,13 +302,13 @@ def render_spray_chart(statcast_df: pd.DataFrame,
 
         custom = np.column_stack([
             _fmt(subset['player_name']),
-            _fmt(subset['opponent'] if 'opponent' in subset.columns else pd.Series(['N/A'] * len(subset), index=subset.index)),
+            _fmt(subset['opponent']),
             _fmt(subset['events']),
             _fmt(subset['_ev'].round(1)),
             _fmt(subset['_dist'].round(0)),
-            _fmt(subset['inning'] if 'inning' in subset.columns else pd.Series(['N/A'] * len(subset), index=subset.index)),
+            _fmt(subset['inning']),
             _fmt(subset['game_date']),
-            _fmt(subset['pitcher_name'] if 'pitcher_name' in subset.columns else pd.Series(['N/A'] * len(subset), index=subset.index)),
+            _fmt(subset['pitcher_name']),
         ])
 
         fig.add_trace(go.Scatter(

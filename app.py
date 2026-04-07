@@ -232,7 +232,7 @@ with tab_summary:
                     st.caption(potg['summary'])
                 else:
                     st.markdown('⭐ **Player of the Game**')
-                    st.caption('Data not yet available for today\'s game.')
+                    st.caption("Data not yet available for today's game.")
 
         with plotg_col:
             with st.container(border=True):
@@ -242,7 +242,7 @@ with tab_summary:
                     st.caption(f"{plotg['batter']} vs {plotg['pitcher']} | Leverage: {plotg['leverage_score']}")
                 else:
                     st.markdown('🔥 **Play of the Game**')
-                    st.caption('Data not yet available for today\'s game.')
+                    st.caption("Data not yet available for today's game.")
     else:
         potg_col, plotg_col = st.columns(2)
         with potg_col:
