@@ -1177,7 +1177,8 @@ def _ordinal(n: int) -> str:
     """Return an integer with its ordinal suffix, e.g. 1 -> '1st'."""
     if 11 <= (n % 100) <= 13:
         return f"{n}th"
-    return f"{n}{('th','st','nd','rd')[min(n % 10, 4)] if n % 10 < 4 else 'th'}"
+    suffixes = {1: 'st', 2: 'nd', 3: 'rd'}
+    return f"{n}{suffixes.get(n % 10, 'th')}"
 
 
 def _encode_runners(play: dict) -> str:
@@ -1472,7 +1473,7 @@ def _compute_pitcher_gis(player_data: dict, player_id: int,
     # Normalize
     norm_wpa = _clamp(wpa / 0.3)
     norm_re24 = _clamp(re24 / 3.0)
-    norm_prv = _clamp(prv / prv_max) if prv_max else 0.0
+    norm_prv = _clamp(prv / prv_max) if prv_max > 0 else 0.0
     norm_lev = _clamp(lev, 0.0, 1.0)
     norm_rpc = _clamp(rpc, 0.0, 1.0)
 
