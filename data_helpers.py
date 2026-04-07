@@ -1452,6 +1452,310 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Frozen game state persistence (JSON-backed)
+# ---------------------------------------------------------------------------
+
+import json
+import os
+from datetime import datetime
+
+_FROZEN_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.frozen_states')
+
+
+def _ensure_frozen_dir() -> None:
+    os.makedirs(_FROZEN_STATE_DIR, exist_ok=True)
+
+
+def _frozen_path(team_id: int) -> str:
+    return os.path.join(_FROZEN_STATE_DIR, f'team_{team_id}.json')
+
+
+def load_frozen_game_state(team_id: int) -> dict[str, Any] | None:
+    """Load the most recent frozen game state for a team from disk."""
+    path = _frozen_path(team_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_frozen_game_state(team_id: int, snapshot: dict[str, Any]) -> None:
+    """Save a frozen game state snapshot for a team to disk."""
+    _ensure_frozen_dir()
+    path = _frozen_path(team_id)
+    try:
+        with open(path, 'w') as f:
+            json.dump(snapshot, f, indent=2, default=str)
+    except Exception:
+        pass  # fail silently — app continues without persistence
+
+
+def should_replace_frozen_state(old_snapshot: dict[str, Any] | None,
+                                current_game: dict[str, Any]) -> bool:
+    """Determine whether the frozen state should be replaced.
+
+    Replace only when:
+    - There is no old snapshot, OR
+    - The current game is a different gamePk AND it has actually started
+      (status is Live or Final, not Pre-Game/Scheduled).
+    """
+    if old_snapshot is None:
+        return True
+    old_pk = old_snapshot.get('gamePk')
+    new_pk = current_game.get('gamePk')
+    if old_pk == new_pk:
+        # Same game — replace if it's now Final and wasn't before
+        return (current_game.get('status') == 'Final'
+                and old_snapshot.get('status') != 'Final')
+    # Different game — replace only if the new game has started
+    new_status = current_game.get('status', '')
+    return new_status in ('Live', 'Final')
+
+
+def build_frozen_snapshot(team_id: int, game_pk: int, game_date: str,
+                          status: str, scorecard: dict[str, Any],
+                          player_of_game: dict[str, Any] | None,
+                          play_of_game: dict[str, Any] | None) -> dict[str, Any]:
+    """Build a frozen snapshot dict."""
+    return {
+        'team_id': team_id,
+        'gamePk': game_pk,
+        'game_date': game_date,
+        'status': status,
+        'scorecard': scorecard,
+        'player_of_game': player_of_game,
+        'play_of_game': play_of_game,
+        'frozen_at': datetime.utcnow().isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Live scorecard HTML rendering helpers
+# ---------------------------------------------------------------------------
+
+def render_scorecard_html(scorecard: dict[str, Any], is_live: bool = False) -> str:
+    """Build HTML/CSS for a custom scorecard matching the Caught Looking style.
+
+    Returns a complete HTML string ready for st.markdown(unsafe_allow_html=True).
+    """
+    if not scorecard:
+        return '<p style="color:#888;">Scorecard data unavailable.</p>'
+
+    innings = scorecard.get('innings', [])
+    away_abbr = scorecard.get('away_abbr', 'AWAY')
+    home_abbr = scorecard.get('home_abbr', 'HOME')
+    away_runs = scorecard.get('away_runs', 0)
+    home_runs = scorecard.get('home_runs', 0)
+    away_hits = scorecard.get('away_hits', 0)
+    home_hits = scorecard.get('home_hits', 0)
+    away_errors = scorecard.get('away_errors', 0)
+    home_errors = scorecard.get('home_errors', 0)
+    status = scorecard.get('status', '')
+    detailed_status = scorecard.get('detailed_status', '')
+    current_inning = scorecard.get('current_inning', 0)
+    inning_state = scorecard.get('inning_state', '')
+    inning_ordinal = scorecard.get('inning_ordinal', '')
+    venue = scorecard.get('venue', '')
+    game_date = scorecard.get('game_date', '')
+
+    # Determine how many inning columns to show (min 9)
+    num_innings = max(9, len(innings))
+
+    # Status label
+    if status == 'Final':
+        status_label = '<span style="color:#e74c3c;font-weight:700;">Final</span>'
+        if len(innings) > 9:
+            status_label = f'<span style="color:#e74c3c;font-weight:700;">Final/{len(innings)}</span>'
+    elif status == 'Live':
+        arrow = '▲' if inning_state == 'Top' else '▼' if inning_state == 'Bottom' else ''
+        status_label = f'<span style="color:#27ae60;font-weight:700;">🔴 {arrow} {inning_ordinal}</span>'
+    else:
+        status_label = f'<span style="color:#888;">{detailed_status or status}</span>'
+
+    # Build inning headers
+    inning_headers = ''
+    for i in range(1, num_innings + 1):
+        highlight = ''
+        if is_live and i == current_inning:
+            highlight = 'background:#2a3a4a;'
+        inning_headers += f'<th style="min-width:32px;text-align:center;padding:4px 6px;font-weight:600;{highlight}">{i}</th>'
+
+    # Build away row
+    away_cells = ''
+    for i in range(num_innings):
+        val = ''
+        highlight = ''
+        if i < len(innings):
+            r = innings[i].get('away_runs')
+            val = str(r) if r is not None else ''
+            if is_live and (i + 1) == current_inning:
+                highlight = 'background:#2a3a4a;'
+        away_cells += f'<td style="text-align:center;padding:4px 6px;{highlight}">{val}</td>'
+
+    # Build home row
+    home_cells = ''
+    for i in range(num_innings):
+        val = ''
+        highlight = ''
+        if i < len(innings):
+            r = innings[i].get('home_runs')
+            val = str(r) if r is not None else ''
+            if is_live and (i + 1) == current_inning:
+                highlight = 'background:#2a3a4a;'
+        home_cells += f'<td style="text-align:center;padding:4px 6px;{highlight}">{val}</td>'
+
+    # Bold the winner's total
+    away_total_style = 'font-weight:700;' if away_runs > home_runs else ''
+    home_total_style = 'font-weight:700;' if home_runs > away_runs else ''
+
+    away_logo = scorecard.get('away_logo', '')
+    home_logo = scorecard.get('home_logo', '')
+    away_record = scorecard.get('away_record', '')
+    home_record = scorecard.get('home_record', '')
+    away_team = scorecard.get('away_team', '')
+    home_team = scorecard.get('home_team', '')
+
+    html = f"""
+<div style="background:#0e1117;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <!-- Game Header -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div style="text-align:center;">
+        <img src="{away_logo}" style="width:40px;height:40px;" alt="{away_abbr}">
+        <div style="font-size:0.7rem;color:#888;">{away_record}</div>
+      </div>
+      <div style="font-size:0.85rem;color:#ccc;">
+        <strong>{away_team}</strong>
+      </div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.75rem;color:#888;">
+        {game_date} · {venue}
+      </div>
+      <div style="font-size:0.9rem;margin-top:2px;">
+        {status_label}
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div style="font-size:0.85rem;color:#ccc;text-align:right;">
+        <strong>{home_team}</strong>
+      </div>
+      <div style="text-align:center;">
+        <img src="{home_logo}" style="width:40px;height:40px;" alt="{home_abbr}">
+        <div style="font-size:0.7rem;color:#888;">{home_record}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scorecard Table -->
+  <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:0.85rem;color:#ddd;">
+      <thead>
+        <tr style="border-bottom:2px solid #444;">
+          <th style="text-align:left;padding:4px 8px;min-width:60px;font-weight:700;">Team</th>
+          {inning_headers}
+          <th style="min-width:36px;text-align:center;padding:4px 6px;font-weight:700;background:#1a2a3a;">R</th>
+          <th style="min-width:36px;text-align:center;padding:4px 6px;font-weight:700;background:#1a2a3a;">H</th>
+          <th style="min-width:36px;text-align:center;padding:4px 6px;font-weight:700;background:#1a2a3a;">E</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="border-bottom:1px solid #333;">
+          <td style="padding:6px 8px;font-weight:600;">{away_abbr}</td>
+          {away_cells}
+          <td style="text-align:center;padding:6px;background:#1a2a3a;{away_total_style}">{away_runs}</td>
+          <td style="text-align:center;padding:6px;background:#1a2a3a;">{away_hits}</td>
+          <td style="text-align:center;padding:6px;background:#1a2a3a;">{away_errors}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 8px;font-weight:600;">{home_abbr}</td>
+          {home_cells}
+          <td style="text-align:center;padding:6px;background:#1a2a3a;{home_total_style}">{home_runs}</td>
+          <td style="text-align:center;padding:6px;background:#1a2a3a;">{home_hits}</td>
+          <td style="text-align:center;padding:6px;background:#1a2a3a;">{home_errors}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>"""
+    return html
+
+
+def render_game_situation_html(scorecard: dict[str, Any]) -> str:
+    """Render live game situation: count, outs, baserunners."""
+    if not scorecard or scorecard.get('status') != 'Live':
+        return ''
+
+    balls = scorecard.get('balls', 0)
+    strikes = scorecard.get('strikes', 0)
+    outs = scorecard.get('outs', 0)
+    runners = scorecard.get('runners', {})
+    inning_state = scorecard.get('inning_state', '')
+    inning_ordinal = scorecard.get('inning_ordinal', '')
+
+    # Base indicators
+    first = '🔶' if runners.get('first') else '⬜'
+    second = '🔶' if runners.get('second') else '⬜'
+    third = '🔶' if runners.get('third') else '⬜'
+
+    # Outs indicators
+    out_dots = '●' * outs + '○' * (3 - outs)
+
+    html = f"""
+<div style="background:#0e1117;border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:8px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="display:flex;justify-content:space-around;align-items:center;color:#ddd;font-size:0.85rem;">
+    <div style="text-align:center;">
+      <div style="font-size:0.75rem;color:#888;margin-bottom:2px;">Count</div>
+      <div><strong>{balls}-{strikes}</strong></div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.75rem;color:#888;margin-bottom:2px;">Outs</div>
+      <div style="letter-spacing:4px;color:#f39c12;">{out_dots}</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:0.75rem;color:#888;margin-bottom:2px;">Bases</div>
+      <div style="line-height:1.4;">
+        <div style="text-align:center;">{second}</div>
+        <div>{third} {first}</div>
+      </div>
+    </div>
+  </div>
+</div>"""
+    return html
+
+
+def render_scoring_plays_html(scorecard: dict[str, Any]) -> str:
+    """Render scoring plays list."""
+    plays = scorecard.get('scoring_plays', [])
+    if not plays:
+        return ''
+    rows = ''
+    for sp in plays:
+        inn = sp.get('inning', 0)
+        half = sp.get('halfInning', '')
+        half_label = '▲' if half == 'top' else '▼'
+        desc = sp.get('description', '')
+        score = f"{sp.get('awayScore', 0)}-{sp.get('homeScore', 0)}"
+        rows += f"""
+        <tr style="border-bottom:1px solid #222;">
+          <td style="padding:4px 8px;color:#888;white-space:nowrap;vertical-align:top;">{half_label}{inn}</td>
+          <td style="padding:4px 8px;font-size:0.8rem;">{desc}</td>
+          <td style="padding:4px 8px;text-align:center;white-space:nowrap;color:#f39c12;vertical-align:top;">{score}</td>
+        </tr>"""
+    html = f"""
+<div style="background:#0e1117;border:1px solid #333;border-radius:8px;padding:12px;margin-top:4px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="font-size:0.85rem;font-weight:700;color:#ddd;margin-bottom:8px;">Scoring Plays</div>
+  <table style="width:100%;border-collapse:collapse;font-size:0.8rem;color:#ccc;">
+    {rows}
+  </table>
+</div>"""
+    return html
+
+
+# ---------------------------------------------------------------------------
 # Playoff simulation helpers
 # ---------------------------------------------------------------------------
 

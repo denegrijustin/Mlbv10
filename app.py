@@ -14,6 +14,8 @@ from mlb_api import (
     choose_live_game_pk, get_live_summary, get_wildcard_standings_combined,
     get_live_feed_full, get_boxscore_data, build_playoff_seeds,
     get_completed_game_pk,
+    get_live_scorecard, get_game_status, get_game_plays,
+    get_current_team_game,
 )
 from data_helpers import (
     safe_team_row, build_team_snapshot, build_summary_df, build_trend_df,
@@ -29,6 +31,10 @@ from data_helpers import (
     run_monte_carlo_matchup,
     build_player_of_game, build_play_of_game,
     simulate_playoff_matchup, simulate_full_playoff_bracket,
+    load_frozen_game_state, save_frozen_game_state,
+    should_replace_frozen_state, build_frozen_snapshot,
+    render_scorecard_html, render_game_situation_html,
+    render_scoring_plays_html,
 )
 from charts import (
     render_recent_trend_chart, render_run_diff_chart,
@@ -693,16 +699,175 @@ with tab_bracket:
 # ===========================================================================
 
 with tab_live:
+    # ---- Determine the tracked game for the selected team ----
     live_pk = choose_live_game_pk(daily_df)
+    completed_pk = get_completed_game_pk(daily_df)
+    tracked_pk = live_pk or completed_pk
 
-    with st.spinner('Checking for live game data...'):
-        live_summary, live_err = get_live_summary(live_pk)
-
-    if live_summary:
-        st.markdown(f"### 🔴 Live: {live_summary.get('away_team', '')} at {live_summary.get('home_team', '')}")
-        live_box = build_live_box_df(live_summary)
-        st.dataframe(live_box.astype(str), use_container_width=True, hide_index=True)
+    # ---- Classify game state: pregame / live / final / none ----
+    game_state = 'none'
+    if live_pk:
+        game_state = 'live'
+    elif completed_pk:
+        game_state = 'final'
     else:
+        # Check if there's a scheduled game (pregame)
+        if not daily_df.empty:
+            pre_statuses = {'Pre-Game', 'Warmup', 'Scheduled'}
+            pre_games = daily_df[daily_df['status'].isin(pre_statuses)]
+            if not pre_games.empty:
+                game_state = 'pregame'
+                tracked_pk = coerce_int(pre_games.iloc[0].get('gamePk'), 0) or None
+
+    # ---- Fetch live scorecard data ----
+    scorecard_data = {}
+    live_feed_data = {}
+    potg = None
+    plotg = None
+
+    if tracked_pk and game_state in ('live', 'final'):
+        with st.spinner('Loading live game data...'):
+            scorecard_data, sc_err = get_live_scorecard(tracked_pk)
+            live_feed_data, lf_err = _cached_get_live_feed(tracked_pk)
+
+        if debug_mode:
+            if sc_err:
+                st.warning(f'Scorecard: {sc_err}')
+            if lf_err:
+                st.warning(f'Live feed: {lf_err}')
+
+        # Compute POTG and PLOTG from live data
+        if live_feed_data:
+            try:
+                potg = build_player_of_game(live_feed_data)
+            except Exception:
+                potg = None
+            try:
+                plotg = build_play_of_game(live_feed_data)
+            except Exception:
+                plotg = None
+
+    # ---- Frozen state logic ----
+    frozen = load_frozen_game_state(selected_team_id)
+
+    if game_state == 'final' and scorecard_data:
+        # Freeze the completed game
+        new_snapshot = build_frozen_snapshot(
+            team_id=selected_team_id,
+            game_pk=tracked_pk,
+            game_date=scorecard_data.get('game_date', ''),
+            status='Final',
+            scorecard=scorecard_data,
+            player_of_game=potg,
+            play_of_game=plotg,
+        )
+        if should_replace_frozen_state(frozen, new_snapshot):
+            save_frozen_game_state(selected_team_id, new_snapshot)
+            frozen = new_snapshot
+
+    elif game_state == 'live' and scorecard_data:
+        # During live game, update the snapshot but mark as Live
+        live_snapshot = build_frozen_snapshot(
+            team_id=selected_team_id,
+            game_pk=tracked_pk,
+            game_date=scorecard_data.get('game_date', ''),
+            status='Live',
+            scorecard=scorecard_data,
+            player_of_game=potg,
+            play_of_game=plotg,
+        )
+        # Save live state so it persists across tab switches
+        save_frozen_game_state(selected_team_id, live_snapshot)
+        frozen = live_snapshot
+
+    # ---- Decide what to display ----
+    display_scorecard = scorecard_data if game_state in ('live', 'final') else None
+    display_potg = potg
+    display_plotg = plotg
+
+    # If pregame or no data, fall back to frozen state
+    if not display_scorecard and frozen:
+        display_scorecard = frozen.get('scorecard')
+        display_potg = frozen.get('player_of_game')
+        display_plotg = frozen.get('play_of_game')
+
+    # ---- Render the scorecard ----
+    if display_scorecard:
+        is_live = game_state == 'live'
+
+        # Render custom HTML scorecard
+        scorecard_html = render_scorecard_html(display_scorecard, is_live=is_live)
+        st.markdown(scorecard_html, unsafe_allow_html=True)
+
+        # Live game situation (count, outs, bases)
+        if is_live:
+            situation_html = render_game_situation_html(display_scorecard)
+            if situation_html:
+                st.markdown(situation_html, unsafe_allow_html=True)
+
+            # Last play
+            last_play = display_scorecard.get('last_play', '')
+            if last_play:
+                st.markdown(
+                    f'<div style="background:#0e1117;border:1px solid #333;border-radius:8px;'
+                    f'padding:10px;margin-bottom:8px;font-size:0.8rem;color:#ccc;">'
+                    f'<strong style="color:#ddd;">Last Play:</strong> {last_play}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Scoring plays
+        scoring_html = render_scoring_plays_html(display_scorecard)
+        if scoring_html:
+            with st.expander('📋 Scoring Plays', expanded=False):
+                st.markdown(scoring_html, unsafe_allow_html=True)
+
+        # ---- POTG and PLOTG cards ----
+        potg_col, plotg_col = st.columns(2)
+
+        with potg_col:
+            with st.container(border=True):
+                if display_potg:
+                    label = '⭐ Player of the Game'
+                    if game_state == 'live':
+                        label = '⭐ Player of the Game (Live)'
+                    st.markdown(f"**{label}**")
+                    st.markdown(f"**{display_potg['player_name']}** ({display_potg['team']}) — {display_potg['role_type']}")
+                    st.caption(display_potg.get('summary', ''))
+                    if debug_mode:
+                        st.caption(f"Score: {display_potg.get('score', 'N/A')}")
+                else:
+                    st.markdown('⭐ **Player of the Game**')
+                    st.caption('Data not yet available.')
+
+        with plotg_col:
+            with st.container(border=True):
+                if display_plotg:
+                    label = '🔥 Play of the Game'
+                    if game_state == 'live':
+                        label = '🔥 Play of the Game (Live)'
+                    st.markdown(f"**{label}**")
+                    st.markdown(f"**{display_plotg.get('description', '')}**")
+                    st.caption(
+                        f"{display_plotg.get('batter', '')} vs {display_plotg.get('pitcher', '')} "
+                        f"| Leverage: {display_plotg.get('leverage_score', 'N/A')}"
+                    )
+                    if debug_mode and display_plotg.get('win_prob_delta') is not None:
+                        st.caption(f"WP Δ: {display_plotg.get('win_prob_delta')}")
+                else:
+                    st.markdown('🔥 **Play of the Game**')
+                    st.caption('Data not yet available.')
+
+        # ---- Frozen state indicator ----
+        if game_state == 'pregame' and frozen:
+            st.caption(
+                f"📌 Showing results from previous game: "
+                f"{frozen.get('game_date', '')} (gamePk {frozen.get('gamePk', '')})"
+            )
+        elif game_state == 'final':
+            st.caption('✅ Game is Final. Results are frozen.')
+
+    else:
+        # No scorecard data at all
         sched_table = build_schedule_table(daily_df, selected_team_name)
         if not sched_table.empty:
             st.markdown(f"**Today's Games** ({date.today().isoformat()})")
@@ -710,12 +875,19 @@ with tab_live:
         else:
             st.info('No games scheduled today or live data is unavailable.')
 
-        if debug_mode and live_err:
-            st.warning(f'Live feed: {live_err}')
+        if debug_mode and game_state == 'none':
+            st.caption('No live, final, or pregame data found for today.')
+
+    # ---- Auto-refresh for live games ----
+    if game_state == 'live':
+        refresh_interval = 30  # seconds
+        st.caption(f'🔄 Auto-refreshing every {refresh_interval}s during live games.')
+        time.sleep(refresh_interval)
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
 
 st.divider()
-st.caption(f'MLB Analytics Dashboard v25 · Season {CURRENT_SEASON} · Data from MLB Stats API & Baseball Savant')
+st.caption(f'MLB Analytics Dashboard v26 · Season {CURRENT_SEASON} · Data from MLB Stats API & Baseball Savant')
