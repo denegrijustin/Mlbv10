@@ -233,9 +233,21 @@ with tab_summary:
         with potg_col:
             with st.container(border=True):
                 if potg:
-                    st.markdown(f"⭐ **Player of the Game**")
-                    st.markdown(f"**{potg['player_name']}** ({potg['team']}) — {potg['role_type']}")
-                    st.caption(potg['summary'])
+                    st.markdown("⭐ **Player of the Game**")
+                    _img, _info = st.columns([1, 3])
+                    with _img:
+                        st.image(potg.get('headshot_url', ''), width=90)
+                    with _info:
+                        st.markdown(
+                            f"**{potg['player_name']}** ({potg['team']}) — {potg['role_type']}")
+                        st.caption(potg['summary'])
+                        st.markdown(
+                            f"**Game Impact Score:** {potg.get('game_impact_score', potg.get('score', 'N/A'))}")
+                    st.caption(
+                        f"WPA: {potg.get('wpa', 'N/A')} · RE24: {potg.get('re24', 'N/A')}")
+                    if potg.get('key_event'):
+                        st.caption(f"Key play: {potg['key_event']}")
+                    st.caption(potg.get('explanation', ''))
                 else:
                     st.markdown('⭐ **Player of the Game**')
                     st.caption("Data not yet available for today's game.")
@@ -243,9 +255,25 @@ with tab_summary:
         with plotg_col:
             with st.container(border=True):
                 if plotg:
-                    st.markdown(f"🔥 **Play of the Game**")
-                    st.markdown(f"**{plotg['description']}**")
-                    st.caption(f"{plotg['batter']} vs {plotg['pitcher']} | Leverage: {plotg['leverage_score']}")
+                    st.markdown("🔥 **Play of the Game**")
+                    if plotg.get('narrative'):
+                        st.markdown(f"*{plotg['narrative']}*")
+                    else:
+                        st.markdown(f"**{plotg['description']}**")
+                    st.caption(
+                        f"{plotg.get('batter', '')} vs {plotg.get('pitcher', '')} "
+                        f"| WPA: {plotg.get('wpa_swing', 'N/A')} "
+                        f"| RE24: {plotg.get('re24_swing', 'N/A')}")
+                    st.caption(
+                        f"Leverage: {plotg.get('inning_label', '')} / "
+                        f"{plotg.get('outs_before', '?')} out(s) / "
+                        f"{plotg.get('runners_before', '')} / "
+                        f"score {plotg.get('score_before', '')}")
+                    for i, ru in enumerate(plotg.get('runner_ups', []), start=2):
+                        st.caption(
+                            f"#{i}: {ru.get('description', '')} "
+                            f"(WPA {ru.get('wpa_swing', 'N/A')}, "
+                            f"RE24 {ru.get('re24_swing', 'N/A')})")
                 else:
                     st.markdown('🔥 **Play of the Game**')
                     st.caption("Data not yet available for today's game.")
@@ -835,10 +863,23 @@ with tab_live:
                     if game_state == 'live':
                         label = '⭐ Player of the Game (Live)'
                     st.markdown(f"**{label}**")
-                    st.markdown(f"**{display_potg['player_name']}** ({display_potg['team']}) — {display_potg['role_type']}")
-                    st.caption(display_potg.get('summary', ''))
-                    if debug_mode:
-                        st.caption(f"Score: {display_potg.get('score', 'N/A')}")
+                    _img_lf, _info_lf = st.columns([1, 3])
+                    with _img_lf:
+                        st.image(display_potg.get('headshot_url', ''), width=90)
+                    with _info_lf:
+                        st.markdown(
+                            f"**{display_potg['player_name']}** "
+                            f"({display_potg['team']}) — {display_potg['role_type']}")
+                        st.caption(display_potg.get('summary', ''))
+                        st.markdown(
+                            f"**Game Impact Score:** "
+                            f"{display_potg.get('game_impact_score', display_potg.get('score', 'N/A'))}")
+                    st.caption(
+                        f"WPA: {display_potg.get('wpa', 'N/A')} · "
+                        f"RE24: {display_potg.get('re24', 'N/A')}")
+                    if display_potg.get('key_event'):
+                        st.caption(f"Key play: {display_potg['key_event']}")
+                    st.caption(display_potg.get('explanation', ''))
                 else:
                     st.markdown('⭐ **Player of the Game**')
                     st.caption('Data not yet available.')
@@ -850,13 +891,26 @@ with tab_live:
                     if game_state == 'live':
                         label = '🔥 Play of the Game (Live)'
                     st.markdown(f"**{label}**")
-                    st.markdown(f"**{display_plotg.get('description', '')}**")
+                    if display_plotg.get('narrative'):
+                        st.markdown(f"*{display_plotg['narrative']}*")
+                    else:
+                        st.markdown(f"**{display_plotg.get('description', '')}**")
                     st.caption(
-                        f"{display_plotg.get('batter', '')} vs {display_plotg.get('pitcher', '')} "
-                        f"| Leverage: {display_plotg.get('leverage_score', 'N/A')}"
-                    )
-                    if debug_mode and display_plotg.get('win_prob_delta') is not None:
-                        st.caption(f"WP Δ: {display_plotg.get('win_prob_delta')}")
+                        f"{display_plotg.get('batter', '')} vs "
+                        f"{display_plotg.get('pitcher', '')} "
+                        f"| WPA: {display_plotg.get('wpa_swing', 'N/A')} "
+                        f"| RE24: {display_plotg.get('re24_swing', 'N/A')}")
+                    st.caption(
+                        f"Leverage: {display_plotg.get('inning_label', '')} / "
+                        f"{display_plotg.get('outs_before', '?')} out(s) / "
+                        f"{display_plotg.get('runners_before', '')} / "
+                        f"score {display_plotg.get('score_before', '')}")
+                    for _ri, _ru in enumerate(
+                            display_plotg.get('runner_ups', []), start=2):
+                        st.caption(
+                            f"#{_ri}: {_ru.get('description', '')} "
+                            f"(WPA {_ru.get('wpa_swing', 'N/A')}, "
+                            f"RE24 {_ru.get('re24_swing', 'N/A')})")
                 else:
                     st.markdown('🔥 **Play of the Game**')
                     st.caption('Data not yet available.')
