@@ -175,6 +175,9 @@ class MLBClient:
     def get_live_feed(self, game_pk: int) -> dict[str, Any]:
         return self._get(f'/game/{game_pk}/feed/live')
 
+    def get_boxscore(self, game_pk: int) -> dict[str, Any]:
+        return self._get(f'/game/{game_pk}/boxscore')
+
     def get_standings(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._get('/standings', params)
 
@@ -572,3 +575,128 @@ def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_
         return out, None
     except Exception as exc:
         return pd.DataFrame(), str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Live feed with plays (full detail)
+# ---------------------------------------------------------------------------
+
+def get_live_feed_full(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
+    """Return full live feed data including all plays for a game."""
+    if not game_pk:
+        return {}, None
+    client = MLBClient()
+    try:
+        data = client.get_live_feed(game_pk)
+        return data, None
+    except Exception as exc:
+        return {}, str(exc)
+
+
+def get_boxscore_data(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
+    """Return boxscore data for a game."""
+    if not game_pk:
+        return {}, None
+    client = MLBClient()
+    try:
+        data = client.get_boxscore(game_pk)
+        return data, None
+    except Exception as exc:
+        return {}, str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Playoff seed generation from standings
+# ---------------------------------------------------------------------------
+
+def build_playoff_seeds(season: int) -> tuple[pd.DataFrame, str | None]:
+    """Build a DataFrame of playoff seeds (1-6) for each league from current standings.
+
+    Columns: league, seed, team_id, team_name, wins, losses, win_pct, logo_url, division
+    Seeds:
+      1-3: division leaders sorted by win_pct (1 = best record, bye)
+      4-6: top 3 non-division-leaders by win_pct (wild cards)
+    """
+    _cols = ['league', 'seed', 'team_id', 'team_name', 'wins', 'losses', 'win_pct',
+             'logo_url', 'division', 'run_diff_per_game']
+    client = MLBClient()
+    all_rows: list[dict[str, Any]] = []
+
+    for league, league_id in [('AL', 103), ('NL', 104)]:
+        try:
+            data = client.get_standings({
+                'leagueId': league_id,
+                'standingsTypes': 'regularSeason',
+                'season': season,
+            })
+        except Exception as exc:
+            return pd.DataFrame(columns=_cols), str(exc)
+
+        division_leaders: list[dict[str, Any]] = []
+        non_leaders: list[dict[str, Any]] = []
+
+        for record in data.get('records', []):
+            div_info = record.get('division') or {}
+            div_id = coerce_int(div_info.get('id'), 0)
+            div_name = ''
+            for dname, did in DIVISION_IDS.items():
+                if did == div_id:
+                    div_name = dname
+                    break
+
+            team_records = record.get('teamRecords', [])
+            sorted_records = sorted(
+                team_records,
+                key=lambda tr: (coerce_int(tr.get('divisionRank'), 99),),
+            )
+            for i, tr in enumerate(sorted_records):
+                team_info = tr.get('team') or {}
+                tid = coerce_int(team_info.get('id'), 0)
+                wins = coerce_int(tr.get('wins'), 0)
+                losses = coerce_int(tr.get('losses'), 0)
+                played = wins + losses
+                wp = round(wins / played, 3) if played > 0 else 0.0
+                meta = TEAM_META.get(tid, {})
+                rd = tr.get('runDifferential', 0)
+                rd_pg = round(coerce_int(rd, 0) / played, 2) if played > 0 else 0.0
+                row = {
+                    'league': league,
+                    'team_id': tid,
+                    'team_name': clean_text(team_info.get('name')),
+                    'wins': wins,
+                    'losses': losses,
+                    'win_pct': wp,
+                    'logo_url': meta.get('logo_url', ''),
+                    'division': div_name,
+                    'run_diff_per_game': rd_pg,
+                }
+                if i == 0:
+                    division_leaders.append(row)
+                else:
+                    non_leaders.append(row)
+
+        # Sort division leaders by win_pct desc (seeds 1-3)
+        division_leaders.sort(key=lambda r: r['win_pct'], reverse=True)
+        for seed_idx, row in enumerate(division_leaders[:3], start=1):
+            row['seed'] = seed_idx
+            all_rows.append(row)
+
+        # Sort non-leaders by win_pct desc (seeds 4-6)
+        non_leaders.sort(key=lambda r: r['win_pct'], reverse=True)
+        for seed_idx, row in enumerate(non_leaders[:3], start=4):
+            row['seed'] = seed_idx
+            all_rows.append(row)
+
+    if not all_rows:
+        return pd.DataFrame(columns=_cols), 'No standings data available to build playoff seeds.'
+    return pd.DataFrame(all_rows)[_cols].reset_index(drop=True), None
+
+
+def get_completed_game_pk(schedule_df: pd.DataFrame) -> int | None:
+    """Return gamePk of the most recently completed game, or None."""
+    if schedule_df.empty:
+        return None
+    finals = schedule_df[schedule_df['abstract_status'] == 'Final'].copy()
+    if finals.empty:
+        return None
+    return coerce_int(finals.iloc[-1].get('gamePk'), 0) or None
