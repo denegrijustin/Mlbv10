@@ -1149,77 +1149,394 @@ def run_monte_carlo_matchup(
 
 
 # ---------------------------------------------------------------------------
-# Player of the Game
+# Player of the Game  –  WAR-style Game Impact Score (GIS) model
 # ---------------------------------------------------------------------------
 
-def _score_batter_potg(player: dict[str, Any]) -> float:
-    """Score a batter for Player of the Game from boxscore batting stats."""
-    stats = player.get('stats', {}).get('batting', {})
+# Standard RE24 run expectancy matrix: {(runners_code, outs): expected_runs}
+# runners_code: '---'=empty, '1--'=1st, '-2-'=2nd, '--3'=3rd, '12-'=1st&2nd, etc.
+# Based on 2010-2015 MLB averages.
+_RE24_MATRIX = {
+    ('---', 0): 0.481, ('---', 1): 0.254, ('---', 2): 0.098,
+    ('1--', 0): 0.859, ('1--', 1): 0.509, ('1--', 2): 0.224,
+    ('-2-', 0): 1.100, ('-2-', 1): 0.664, ('-2-', 2): 0.319,
+    ('--3', 0): 1.357, ('--3', 1): 0.950, ('--3', 2): 0.353,
+    ('12-', 0): 1.437, ('12-', 1): 0.884, ('12-', 2): 0.429,
+    ('1-3', 0): 1.798, ('1-3', 1): 1.140, ('1-3', 2): 0.494,
+    ('-23', 0): 1.920, ('-23', 1): 1.352, ('-23', 2): 0.570,
+    ('123', 0): 2.282, ('123', 1): 1.520, ('123', 2): 0.736,
+}
+
+# Positional defense premiums (abbreviation -> normalized 0-1 bonus)
+_DEFENSE_PREMIUM: dict[str, float] = {
+    'C': 0.8, 'SS': 0.7, 'CF': 0.6, '2B': 0.4, '3B': 0.3,
+    'RF': 0.2, 'LF': 0.1, '1B': 0.05, 'DH': 0.0,
+}
+
+
+def _encode_runners(play: dict) -> str:
+    """Convert play's runner / matchup data to a runners code like '1-3' or '---'."""
+    matchup = play.get('matchup', {})
+    on_first = matchup.get('postOnFirst') is not None
+    on_second = matchup.get('postOnSecond') is not None
+    on_third = matchup.get('postOnThird') is not None
+
+    # Fallback: infer from runners list when matchup fields are absent
+    if not (on_first or on_second or on_third):
+        for r in play.get('runners', []):
+            start = (r.get('movement') or {}).get('start', '')
+            if start == '1B':
+                on_first = True
+            elif start == '2B':
+                on_second = True
+            elif start == '3B':
+                on_third = True
+
+    code = ('1' if on_first else '-') + ('2' if on_second else '-') + ('3' if on_third else '-')
+    return code
+
+
+def _calc_re24_swing(play: dict) -> float:
+    """Compute the RE24 run-expectancy swing for a single play.
+
+    RE24 swing = (runs_scored_on_play + RE_after) - RE_before
+    """
+    about = play.get('about', {})
+    outs_before = coerce_int(about.get('outs'), 0)
+
+    # Runs scored on this play
+    runners = play.get('runners', [])
+    runs_scored = sum(
+        1 for r in runners
+        if (r.get('movement') or {}).get('end', '') == 'score'
+    )
+
+    # State before the play
+    runners_before = _encode_runners(play)
+    re_before = _RE24_MATRIX.get((runners_before, min(outs_before, 2)), 0.0)
+
+    # State after – derive from runner movements
+    on1 = on2 = on3 = False
+    outs_added = 0
+    for r in runners:
+        mov = r.get('movement') or {}
+        end = mov.get('end', '')
+        is_out = mov.get('isOut', False)
+        if is_out:
+            outs_added += 1
+        elif end == '1B':
+            on1 = True
+        elif end == '2B':
+            on2 = True
+        elif end == '3B':
+            on3 = True
+
+    outs_after = min(outs_before + outs_added, 3)
+    if outs_after >= 3:
+        re_after = 0.0
+    else:
+        code_after = ('1' if on1 else '-') + ('2' if on2 else '-') + ('3' if on3 else '-')
+        re_after = _RE24_MATRIX.get((code_after, outs_after), 0.0)
+
+    return round(runs_scored + re_after - re_before, 4)
+
+
+def _accumulate_player_impact(all_plays: list, winning_side: str) -> dict:
+    """Accumulate WPA and RE24 for each player across all plays.
+
+    *winning_side* is ``'home'`` or ``'away'``.
+
+    Returns dict keyed by player_id (int) with::
+
+        wpa:            float  – total WPA from the perspective of that player's team winning
+        re24:           float  – total RE24 impact
+        key_event:      str    – description of their highest-|WPA| play
+        key_wpa:        float  – WPA of that single play
+        negative_plays: int    – count of plays with negative WPA
+        late_positive:  bool   – had a positive-WPA play in inning >= 7
+        team_side:      str    – 'home' or 'away'
+    """
+
+    accum: dict[int, dict] = {}
+
+    def _ensure(pid: int, side: str) -> dict:
+        if pid not in accum:
+            accum[pid] = {
+                'wpa': 0.0, 're24': 0.0,
+                'key_event': '', 'key_wpa': 0.0,
+                'negative_plays': 0, 'late_positive': False,
+                'team_side': side,
+            }
+        return accum[pid]
+
+    for play in all_plays:
+        result = play.get('result', {})
+        event = result.get('event', '')
+        if not event:
+            continue
+
+        about = play.get('about', {})
+        matchup = play.get('matchup', {})
+        half = about.get('halfInning', 'top')
+        inning = coerce_int(about.get('inning'), 1)
+        batter_side = 'away' if half == 'top' else 'home'
+        pitcher_side = 'home' if half == 'top' else 'away'
+
+        batter_id = coerce_int(matchup.get('batter', {}).get('id'), 0)
+        pitcher_id = coerce_int(matchup.get('pitcher', {}).get('id'), 0)
+        if batter_id == 0 and pitcher_id == 0:
+            continue
+
+        # WPA from the home team's perspective
+        raw_wpa: float | None = None
+        hw = about.get('homeWinProbabilityAdded')
+        if hw is not None:
+            try:
+                raw_wpa = float(hw)
+            except (TypeError, ValueError):
+                raw_wpa = None
+
+        # If unavailable, approximate from fallback leverage
+        if raw_wpa is None:
+            fb = _calc_fallback_leverage(play) / 100.0
+            raw_wpa = fb if batter_side == 'home' else -fb
+
+        re24 = _calc_re24_swing(play)
+
+        # Translate WPA to winning-side perspective
+        if winning_side == 'home':
+            home_wpa = raw_wpa
+        else:
+            home_wpa = -raw_wpa
+
+        batter_wpa = home_wpa if batter_side == winning_side else -home_wpa
+        pitcher_wpa = -batter_wpa  # zero-sum between batter and pitcher
+
+        desc = result.get('description', event.replace('_', ' '))
+
+        # Credit batter
+        if batter_id:
+            b = _ensure(batter_id, batter_side)
+            b['wpa'] += batter_wpa
+            b['re24'] += re24
+            if batter_wpa < 0:
+                b['negative_plays'] += 1
+            if batter_wpa > 0 and inning >= 7:
+                b['late_positive'] = True
+            if abs(batter_wpa) > abs(b['key_wpa']):
+                b['key_wpa'] = batter_wpa
+                b['key_event'] = desc
+
+        # Credit pitcher (RE24 inverted: runs prevented = positive)
+        if pitcher_id:
+            p = _ensure(pitcher_id, pitcher_side)
+            p['wpa'] += pitcher_wpa
+            p['re24'] += -re24
+            if pitcher_wpa < 0:
+                p['negative_plays'] += 1
+            if pitcher_wpa > 0 and inning >= 7:
+                p['late_positive'] = True
+            if abs(pitcher_wpa) > abs(p['key_wpa']):
+                p['key_wpa'] = pitcher_wpa
+                p['key_event'] = desc
+
+    return accum
+
+
+def _clamp(val: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, val))
+
+
+def _parse_ip(ip_str: str) -> float:
+    """Parse an innings-pitched string like '6.2' into a float (6.667)."""
+    try:
+        parts = str(ip_str).split('.')
+        whole = float(parts[0])
+        frac = float(parts[1]) / 3.0 if len(parts) > 1 else 0.0
+        return whole + frac
+    except (ValueError, IndexError):
+        return 0.0
+
+
+# ---- GIS: batters ----------------------------------------------------------
+
+def _compute_batter_gis(player_data: dict, player_id: int,
+                         impact_accum: dict, boxscore_stats: dict) -> dict:
+    """Compute Game Impact Score for a hitter."""
+    acc = impact_accum.get(player_id, {})
+    wpa = acc.get('wpa', 0.0)
+    re24 = acc.get('re24', 0.0)
+
+    stats = boxscore_stats
+
+    hits = coerce_int(stats.get('hits'), 0)
     hr = coerce_int(stats.get('homeRuns'), 0)
     triples = coerce_int(stats.get('triples'), 0)
     doubles = coerce_int(stats.get('doubles'), 0)
-    hits = coerce_int(stats.get('hits'), 0)
     singles = max(0, hits - hr - triples - doubles)
-    rbi = coerce_int(stats.get('rbi'), 0)
-    runs = coerce_int(stats.get('runs'), 0)
+    ab = coerce_int(stats.get('atBats'), 0)
     bb = coerce_int(stats.get('baseOnBalls'), 0)
     hbp = coerce_int(stats.get('hitByPitch'), 0)
     sb = coerce_int(stats.get('stolenBases'), 0)
-    score = (hr * 6.0 + triples * 4.0 + doubles * 3.0 + singles * 1.5
-             + rbi * 2.0 + runs * 1.5 + (bb + hbp) * 1.0 + sb * 1.5)
-    return round(score, 2)
+    cs = coerce_int(stats.get('caughtStealing'), 0)
+
+    # Offensive run value (linear weights)
+    orv = (singles * 0.46 + doubles * 0.76 + triples * 1.06
+           + hr * 1.40 + (bb + hbp) * 0.33
+           - max(0, ab - hits) * 0.25)
+
+    # Baserunning run value
+    brv = sb * 0.20 - cs * 0.41
+
+    # Defensive positional premium
+    pos = player_data.get('position', {}).get('abbreviation', '')
+    defense = _DEFENSE_PREMIUM.get(pos, 0.0)
+
+    # Normalize each component
+    norm_wpa = _clamp(wpa / 0.3)
+    norm_re24 = _clamp(re24 / 3.0)
+    norm_off = _clamp(orv / 4.0)
+    norm_br = _clamp(brv / 0.5)
+    norm_def = _clamp(defense, 0.0, 1.0)
+
+    gis = (0.55 * norm_wpa + 0.25 * norm_re24 + 0.10 * norm_off
+           + 0.05 * norm_br + 0.05 * norm_def)
+
+    return {
+        'gis': round(gis, 4),
+        'wpa': round(wpa, 4),
+        're24': round(re24, 4),
+        'offensive_rv': round(orv, 4),
+        'baserunning_rv': round(brv, 4),
+        'defense_bonus': round(defense, 2),
+        'key_event': acc.get('key_event', ''),
+        'negative_plays': acc.get('negative_plays', 0),
+        'late_positive': acc.get('late_positive', False),
+    }
 
 
-def _score_pitcher_potg(player: dict[str, Any], is_starter: bool = False) -> float:
-    """Score a pitcher for Player of the Game from boxscore pitching stats."""
-    stats = player.get('stats', {}).get('pitching', {})
-    ip_str = str(stats.get('inningsPitched', '0'))
-    try:
-        parts = ip_str.split('.')
-        ip = float(parts[0]) + float(parts[1]) / 3 if len(parts) > 1 else float(parts[0])
-    except (ValueError, IndexError):
-        ip = 0.0
+# ---- GIS: pitchers ---------------------------------------------------------
+
+def _compute_pitcher_gis(player_data: dict, player_id: int,
+                          impact_accum: dict, boxscore_stats: dict,
+                          is_starter: bool) -> dict:
+    """Compute Game Impact Score for a pitcher."""
+    acc = impact_accum.get(player_id, {})
+    wpa = acc.get('wpa', 0.0)
+    re24 = acc.get('re24', 0.0)
+
+    stats = boxscore_stats
+    ip = _parse_ip(str(stats.get('inningsPitched', '0')))
     k = coerce_int(stats.get('strikeOuts'), 0)
     er = coerce_int(stats.get('earnedRuns'), 0)
     h = coerce_int(stats.get('hits'), 0)
     bb = coerce_int(stats.get('baseOnBalls'), 0)
-    score = ip * 3.0 + k * 2.0 - er * 4.0 - h * 0.5 - bb * 0.5
-    if is_starter and ip >= 6.0 and er <= 3:
-        score += 5.0  # quality start bonus
-    if not is_starter:
-        if ip >= 1.0 and er == 0:
-            score += 3.0  # clean relief bonus
-    return round(score, 2)
+    hr_allowed = coerce_int(stats.get('homeRuns'), 0)
 
+    # Pitching run value
+    prv = ip * 0.7 + k * 0.15 - er * 1.0 - (h + bb) * 0.15
+    prv_max = 6.0 if is_starter else 2.0
+
+    # Leverage / workload bonus (0-1 scale)
+    lev = 0.0
+    if is_starter:
+        if ip >= 6.0 and er <= 3:
+            lev += 0.5  # quality start
+        if ip >= 7.0:
+            lev += 0.3  # deep outing
+    else:
+        saves = coerce_int(stats.get('saves'), 0)
+        holds = coerce_int(stats.get('holds'), 0)
+        if saves > 0:
+            lev += 0.5
+        if holds > 0:
+            lev += 0.3
+        if ip >= 1.0 and er == 0:
+            lev += 0.2  # clean outing
+
+    # Run prevention context (0-1 scale)
+    rpc = 0.0
+    if is_starter and er == 0 and h <= 3:
+        rpc += 0.5
+    if bb > 0 and k / bb >= 3.0:
+        rpc += 0.3
+    elif bb == 0 and k > 0:
+        rpc += 0.4
+
+    # Normalize
+    norm_wpa = _clamp(wpa / 0.3)
+    norm_re24 = _clamp(re24 / 3.0)
+    norm_prv = _clamp(prv / prv_max) if prv_max else 0.0
+    norm_lev = _clamp(lev, 0.0, 1.0)
+    norm_rpc = _clamp(rpc, 0.0, 1.0)
+
+    gis = (0.55 * norm_wpa + 0.25 * norm_re24 + 0.10 * norm_prv
+           + 0.05 * norm_lev + 0.05 * norm_rpc)
+
+    return {
+        'gis': round(gis, 4),
+        'wpa': round(wpa, 4),
+        're24': round(re24, 4),
+        'pitching_rv': round(prv, 4),
+        'leverage_bonus': round(lev, 2),
+        'run_prevention': round(rpc, 2),
+        'key_event': acc.get('key_event', ''),
+        'negative_plays': acc.get('negative_plays', 0),
+        'late_positive': acc.get('late_positive', False),
+    }
+
+
+# ---- Summary formatters ----------------------------------------------------
 
 def _format_batter_summary(player: dict[str, Any]) -> str:
+    """Full batter stat line: H-AB, R, HR, RBI, BB, K, SB, TB."""
     stats = player.get('stats', {}).get('batting', {})
     ab = coerce_int(stats.get('atBats'), 0)
     h = coerce_int(stats.get('hits'), 0)
+    r = coerce_int(stats.get('runs'), 0)
     hr = coerce_int(stats.get('homeRuns'), 0)
     rbi = coerce_int(stats.get('rbi'), 0)
-    parts = [f'{h}-{ab}']
-    if hr > 0:
-        parts.append(f'{hr} HR')
-    if rbi > 0:
-        parts.append(f'{rbi} RBI')
-    return ', '.join(parts)
+    bb = coerce_int(stats.get('baseOnBalls'), 0)
+    k = coerce_int(stats.get('strikeOuts'), 0)
+    sb = coerce_int(stats.get('stolenBases'), 0)
+    doubles = coerce_int(stats.get('doubles'), 0)
+    triples = coerce_int(stats.get('triples'), 0)
+    singles = max(0, h - hr - triples - doubles)
+    tb = singles + doubles * 2 + triples * 3 + hr * 4
+    return (f"{h}-{ab}, {r} R, {hr} HR, {rbi} RBI, "
+            f"{bb} BB, {k} K, {sb} SB, {tb} TB")
 
 
 def _format_pitcher_summary(player: dict[str, Any]) -> str:
+    """Full pitcher stat line: IP, H, R, ER, BB, K, HR, P-S."""
     stats = player.get('stats', {}).get('pitching', {})
     ip = stats.get('inningsPitched', '0')
-    k = coerce_int(stats.get('strikeOuts'), 0)
-    er = coerce_int(stats.get('earnedRuns'), 0)
     h = coerce_int(stats.get('hits'), 0)
-    return f'{ip} IP, {k} K, {er} ER, {h} H'
+    r = coerce_int(stats.get('runs'), 0)
+    er = coerce_int(stats.get('earnedRuns'), 0)
+    bb = coerce_int(stats.get('baseOnBalls'), 0)
+    k = coerce_int(stats.get('strikeOuts'), 0)
+    hr = coerce_int(stats.get('homeRuns'), 0)
+    pitches = coerce_int(stats.get('pitchesThrown')
+                         or stats.get('numberOfPitches'), 0)
+    strikes = coerce_int(stats.get('strikes'), 0)
+    saves = coerce_int(stats.get('saves'), 0)
+    holds = coerce_int(stats.get('holds'), 0)
+    line = (f"{ip} IP, {h} H, {r} R, {er} ER, {bb} BB, "
+            f"{k} K, {hr} HR, {pitches}-{strikes} P-S")
+    if saves > 0:
+        line += f", {saves} SV"
+    if holds > 0:
+        line += f", {holds} HLD"
+    return line
 
+
+# ---- Player of the Game (main entry point) ---------------------------------
 
 def build_player_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
-    """Identify the Player of the Game from live feed data.
+    """Identify the Player of the Game using a WAR-style Game Impact Score.
 
-    Returns dict with keys: player_name, team, role_type, score, summary
-    or None if data is insufficient.
+    Returns dict with backward-compatible keys (``score``, ``summary``, …) plus
+    new GIS-related fields, or ``None`` if data is insufficient.
     """
     if not live_feed_data:
         return None
@@ -1234,98 +1551,124 @@ def build_player_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | Non
     away_starter_id = coerce_int((probable.get('away') or {}).get('id'), 0)
     home_starter_id = coerce_int((probable.get('home') or {}).get('id'), 0)
 
+    # Determine winning side from linescore / final score
+    linescore = live_data.get('linescore', {})
+    home_runs_total = coerce_int(
+        linescore.get('teams', {}).get('home', {}).get('runs'), 0)
+    away_runs_total = coerce_int(
+        linescore.get('teams', {}).get('away', {}).get('runs'), 0)
+    winning_side = 'home' if home_runs_total >= away_runs_total else 'away'
+
+    # Accumulate per-play WPA / RE24 across all plays
+    all_plays = live_data.get('plays', {}).get('allPlays', [])
+    impact = _accumulate_player_impact(all_plays, winning_side)
+
     candidates: list[dict[str, Any]] = []
 
     for side in ('away', 'home'):
         team_box = boxscore.get('teams', {}).get(side, {})
         team_name = teams_info.get(side, {}).get('name', side.title())
         players = team_box.get('players', {})
-
-        starters_list = []
-        first_pitcher_id = None
         pitcher_order = team_box.get('pitchers', [])
-        if pitcher_order:
-            first_pitcher_id = pitcher_order[0] if pitcher_order else None
+        first_pitcher_id = pitcher_order[0] if pitcher_order else None
 
         for pid_key, pdata in players.items():
             pid = coerce_int(pdata.get('person', {}).get('id'), 0)
             name = pdata.get('person', {}).get('fullName', 'Unknown')
-            position = pdata.get('position', {}).get('abbreviation', '')
 
-            # Batting stats
+            # Batting GIS
             bat_stats = pdata.get('stats', {}).get('batting', {})
             if bat_stats and coerce_int(bat_stats.get('atBats'), 0) > 0:
-                score = _score_batter_potg(pdata)
+                gis_info = _compute_batter_gis(pdata, pid, impact, bat_stats)
                 candidates.append({
                     'player_name': name,
+                    'player_id': pid,
                     'team': team_name,
-                    'role_type': 'Batter',
-                    'score': score,
+                    'role_type': 'Hitter',
                     'summary': _format_batter_summary(pdata),
-                    '_player': pdata,
+                    '_gis': gis_info,
                 })
 
-            # Pitching stats
+            # Pitching GIS
             pit_stats = pdata.get('stats', {}).get('pitching', {})
             if pit_stats and pit_stats.get('inningsPitched') is not None:
-                is_starter = False
-                if pid == away_starter_id or pid == home_starter_id:
-                    is_starter = True
-                elif first_pitcher_id and pid == first_pitcher_id:
-                    is_starter = True
+                is_starter = (pid == away_starter_id or pid == home_starter_id
+                              or (first_pitcher_id and pid == first_pitcher_id))
                 role = 'Starter' if is_starter else 'Reliever'
-                score = _score_pitcher_potg(pdata, is_starter)
+                gis_info = _compute_pitcher_gis(
+                    pdata, pid, impact, pit_stats, bool(is_starter))
                 candidates.append({
                     'player_name': name,
+                    'player_id': pid,
                     'team': team_name,
                     'role_type': role,
-                    'score': score,
                     'summary': _format_pitcher_summary(pdata),
-                    '_player': pdata,
+                    '_gis': gis_info,
                 })
 
     if not candidates:
         return None
 
-    best = max(candidates, key=lambda c: c['score'])
+    # Rank: GIS (desc) → WPA → RE24 → late_positive → fewer negative plays
+    candidates.sort(key=lambda c: (
+        c['_gis']['gis'],
+        c['_gis']['wpa'],
+        c['_gis']['re24'],
+        1 if c['_gis']['late_positive'] else 0,
+        -c['_gis']['negative_plays'],
+    ), reverse=True)
+
+    best = candidates[0]
+    gi = best['_gis']
+    pid = best['player_id']
+    headshot_url = (
+        "https://img.mlbstatic.com/mlb-photos/image/upload/"
+        "d_people:generic:headshot:67:current.png/"
+        f"w_213,q_auto:best/v1/people/{pid}/headshot/67/current"
+    )
+
     return {
         'player_name': best['player_name'],
+        'player_id': pid,
         'team': best['team'],
         'role_type': best['role_type'],
-        'score': best['score'],
+        'headshot_url': headshot_url,
         'summary': best['summary'],
+        'game_impact_score': gi['gis'],
+        'wpa': gi['wpa'],
+        're24': gi['re24'],
+        'key_event': gi['key_event'],
+        'explanation': (
+            "Won Player of the Game because he produced the highest "
+            "Game Impact Score in the game."
+        ),
+        # Backward-compatible key
+        'score': gi['gis'],
     }
 
 
 # ---------------------------------------------------------------------------
-# Play of the Game
+# Play of the Game  –  WPA / RE24 based ranking
 # ---------------------------------------------------------------------------
 
 def _calc_fallback_leverage(play: dict[str, Any], total_innings: int = 9) -> float:
-    """Calculate a fallback leverage score when win probability delta is unavailable."""
+    """Calculate a fallback leverage + RE24-style score when WPA is unavailable."""
     about = play.get('about', {})
     inning = coerce_int(about.get('inning'), 1)
-    half = about.get('halfInning', 'top')
     outs = coerce_int(about.get('outs'), 0)
     result = play.get('result', {})
     event = result.get('event', '')
 
-    # Score context
     away_score = coerce_int(result.get('awayScore'), 0)
     home_score = coerce_int(result.get('homeScore'), 0)
     diff = abs(away_score - home_score)
 
-    # Runners context
     runners = play.get('runners', [])
-    runners_on = len([r for r in runners if r.get('movement', {}).get('start')])
-
-    # RBI from the play
+    runners_on = len([r for r in runners if (r.get('movement') or {}).get('start')])
     rbi = coerce_int(result.get('rbi'), 0)
 
-    # Inning factor: later innings are higher leverage
     inning_factor = min(inning / total_innings, 1.5)
 
-    # Close game factor: close games are higher leverage
     if diff <= 1:
         close_factor = 2.0
     elif diff <= 3:
@@ -1333,25 +1676,35 @@ def _calc_fallback_leverage(play: dict[str, Any], total_innings: int = 9) -> flo
     else:
         close_factor = 0.5
 
-    # Outs factor: more outs = higher leverage
     out_factor = 1.0 + (outs * 0.3)
-
-    # Scoring impact
     scoring_factor = rbi * 1.5 + (1.0 if event in ('home_run', 'triple', 'double') else 0.5)
-
-    # Runners on base factor
     runner_factor = 1.0 + (runners_on * 0.3)
 
-    leverage = inning_factor * close_factor * out_factor * scoring_factor * runner_factor
+    # Incorporate RE24 swing as an additive boost
+    re24 = _calc_re24_swing(play)
+    re24_boost = max(0.0, re24) * 0.5
+
+    leverage = inning_factor * close_factor * out_factor * scoring_factor * runner_factor + re24_boost
     return round(leverage, 3)
 
 
-def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
-    """Find the highest leverage play from a game's live feed data.
+def _play_sort_key(entry: dict) -> tuple:
+    """Multi-criteria sort key for play ranking (all descending)."""
+    return (
+        entry['wpa_swing'],
+        entry['re24_swing'],
+        entry['inning'],
+        entry['leverage'],
+        entry['score_delta'],
+    )
 
-    Returns dict with: inning, batter, pitcher, event, score_before, score_after,
-    leverage_score, win_prob_delta, description
-    or None if data is insufficient.
+
+def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Find the highest-impact play from a game's live feed data.
+
+    Ranks plays by WPA swing → RE24 swing → later inning → leverage →
+    scoreboard swing.  Returns a dict with backward-compatible keys plus new
+    WPA/RE24 fields and runner-up plays, or ``None`` if data is insufficient.
     """
     if not live_feed_data:
         return None
@@ -1360,8 +1713,15 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
     if not all_plays:
         return None
 
-    best_play = None
-    best_score = -1.0
+    # Determine winning side
+    linescore = live_data.get('linescore', {})
+    home_runs_total = coerce_int(
+        linescore.get('teams', {}).get('home', {}).get('runs'), 0)
+    away_runs_total = coerce_int(
+        linescore.get('teams', {}).get('away', {}).get('runs'), 0)
+    winning_side = 'home' if home_runs_total >= away_runs_total else 'away'
+
+    scored_plays: list[dict] = []
 
     for play in all_plays:
         result = play.get('result', {})
@@ -1370,85 +1730,147 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
             continue
 
         about = play.get('about', {})
-        # Try win probability delta first
-        wp_delta = None
-        if 'homeWinProbabilityAdded' in about:
+        matchup = play.get('matchup', {})
+
+        # WPA swing (winning-side perspective)
+        raw_wpa: float | None = None
+        hw = about.get('homeWinProbabilityAdded')
+        if hw is not None:
             try:
-                wp_delta = abs(float(about['homeWinProbabilityAdded']))
+                raw_wpa = float(hw)
             except (TypeError, ValueError):
-                wp_delta = None
+                raw_wpa = None
 
-        if wp_delta is not None:
-            leverage = wp_delta * 100
+        half = about.get('halfInning', 'top')
+        if raw_wpa is not None:
+            wpa_swing = raw_wpa if winning_side == 'home' else -raw_wpa
         else:
-            leverage = _calc_fallback_leverage(play)
+            fb = _calc_fallback_leverage(play) / 100.0
+            batter_side = 'away' if half == 'top' else 'home'
+            wpa_swing = fb if batter_side == winning_side else -fb
 
-        if leverage > best_score:
-            best_score = leverage
-            best_play = play
+        re24_swing = _calc_re24_swing(play)
+        inning = coerce_int(about.get('inning'), 0)
+        leverage = _calc_fallback_leverage(play)
 
-    if best_play is None:
+        away_score = coerce_int(result.get('awayScore'), 0)
+        home_score = coerce_int(result.get('homeScore'), 0)
+        rbi = coerce_int(result.get('rbi'), 0)
+
+        scored_plays.append({
+            'play': play,
+            'wpa_swing': wpa_swing,
+            're24_swing': re24_swing,
+            'inning': inning,
+            'leverage': leverage,
+            'score_delta': rbi,
+        })
+
+    if not scored_plays:
         return None
 
-    about = best_play.get('about', {})
-    result = best_play.get('result', {})
-    matchup = best_play.get('matchup', {})
+    scored_plays.sort(key=_play_sort_key, reverse=True)
 
-    inning = coerce_int(about.get('inning'), 0)
-    half = about.get('halfInning', '')
-    inning_label = f"{'Top' if half == 'top' else 'Bot'} {inning}"
+    def _build_play_dict(entry: dict, include_full: bool = False) -> dict:
+        play = entry['play']
+        about = play.get('about', {})
+        result = play.get('result', {})
+        matchup = play.get('matchup', {})
 
-    batter = matchup.get('batter', {}).get('fullName', 'Unknown')
-    pitcher = matchup.get('pitcher', {}).get('fullName', 'Unknown')
+        inning = coerce_int(about.get('inning'), 0)
+        half = about.get('halfInning', '')
+        inning_label = f"{'Top' if half == 'top' else 'Bot'} {inning}"
+        batter = matchup.get('batter', {}).get('fullName', 'Unknown')
+        pitcher = matchup.get('pitcher', {}).get('fullName', 'Unknown')
+        event = result.get('event', '')
+        away_score = coerce_int(result.get('awayScore'), 0)
+        home_score = coerce_int(result.get('homeScore'), 0)
+        rbi = coerce_int(result.get('rbi'), 0)
+        description = result.get('description', '')
 
-    away_score = coerce_int(result.get('awayScore'), 0)
-    home_score = coerce_int(result.get('homeScore'), 0)
+        if half == 'top':
+            score_before = f"{away_score - rbi}-{home_score}"
+        else:
+            score_before = f"{away_score}-{home_score - rbi}"
+        score_after = f"{away_score}-{home_score}"
 
-    rbi = coerce_int(result.get('rbi'), 0)
-    description = result.get('description', '')
-
-    # Reconstruct score_before by subtracting RBI from the batting team's score
-    if half == 'top':
-        score_before = f"{away_score - rbi}-{home_score}"
-    else:
-        score_before = f"{away_score}-{home_score - rbi}"
-    score_after = f"{away_score}-{home_score}"
-
-    # Build human readable description
-    outs = coerce_int(about.get('outs'), 0)
-    event = result.get('event', '')
-
-    runners = best_play.get('runners', [])
-    runner_starts = [r.get('movement', {}).get('start', '') for r in runners if r.get('movement', {}).get('start')]
-    runner_desc = ''
-    if runner_starts:
+        outs = coerce_int(about.get('outs'), 0)
+        runners = play.get('runners', [])
+        runner_starts = [
+            (r.get('movement') or {}).get('start', '')
+            for r in runners if (r.get('movement') or {}).get('start')
+        ]
         bases = [s for s in runner_starts if s and s != 'null']
+        runners_before = ', '.join(bases) if bases else 'bases empty'
+
+        # Human-readable short description (backward compat)
+        parts = [inning_label]
+        if outs > 0:
+            parts.append(f"{outs} out{'s' if outs > 1 else ''}")
         if bases:
-            runner_desc = f"runner(s) on {', '.join(bases)}"
+            parts.append(f"runner(s) on {', '.join(bases)}")
+        if away_score == home_score:
+            parts.append("tie game")
+        parts.append(event.replace('_', ' '))
+        readable = ', '.join(parts)
 
-    parts = [f"{inning_label}"]
-    if outs > 0:
-        parts.append(f"{outs} out{'s' if outs > 1 else ''}")
-    if runner_desc:
-        parts.append(runner_desc)
-    if away_score == home_score:
-        parts.append("tie game")
-    parts.append(event.replace('_', ' '))
-    readable = ', '.join(parts)
+        d: dict[str, Any] = {
+            'description': readable,
+            'wpa_swing': round(entry['wpa_swing'], 4),
+            're24_swing': round(entry['re24_swing'], 4),
+        }
 
-    return {
-        'inning': inning,
-        'inning_label': inning_label,
-        'batter': batter,
-        'pitcher': pitcher,
-        'event': event,
-        'score_before': score_before,
-        'score_after': score_after,
-        'leverage_score': round(best_score, 2),
-        'win_prob_delta': about.get('homeWinProbabilityAdded'),
-        'description': readable,
-        'full_description': description,
-    }
+        if include_full:
+            # Narrative
+            half_word = 'Top' if half == 'top' else 'Bottom'
+            outs_word = {0: 'no outs', 1: 'one out', 2: 'two outs'}.get(outs, f'{outs} outs')
+            wp_before = about.get('homeWinProbability')
+            wp_after_raw = None
+            if wp_before is not None and about.get('homeWinProbabilityAdded') is not None:
+                try:
+                    wp_after_raw = float(wp_before) + float(about['homeWinProbabilityAdded'])
+                except (TypeError, ValueError):
+                    pass
+            wp_part = ''
+            if wp_before is not None and wp_after_raw is not None:
+                wp_part = (f", flipping win expectancy from "
+                           f"{coerce_float(wp_before, 0):.0f}% to {wp_after_raw:.0f}%")
+
+            narrative = (
+                f"{half_word} of the {inning}{'th' if inning not in (1,2,3) else ['st','nd','rd'][inning-1]}, "
+                f"score {score_before} with {outs_word}"
+                f"{' and ' + runners_before if bases else ''}, "
+                f"{batter} {event.replace('_', ' ')}"
+                f"{wp_part}."
+            )
+
+            d.update({
+                'inning': inning,
+                'inning_label': inning_label,
+                'batter': batter,
+                'pitcher': pitcher,
+                'event': event,
+                'score_before': score_before,
+                'score_after': score_after,
+                'outs_before': outs,
+                'runners_before': runners_before,
+                'leverage_score': round(entry['leverage'], 2),
+                'win_prob_delta': about.get('homeWinProbabilityAdded'),
+                'narrative': narrative,
+                'full_description': description,
+            })
+        return d
+
+    top = _build_play_dict(scored_plays[0], include_full=True)
+
+    # Runner-ups (2nd and 3rd best)
+    runner_ups = [
+        _build_play_dict(scored_plays[i])
+        for i in range(1, min(3, len(scored_plays)))
+    ]
+    top['runner_ups'] = runner_ups
+
+    return top
 
 
 # ---------------------------------------------------------------------------
