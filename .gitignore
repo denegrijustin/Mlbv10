@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 venv/
 .streamlit/secrets.toml
+
+# Frozen game states
+.frozen_states/*.json

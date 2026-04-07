@@ -1,0 +1,2 @@
+# Frozen game state persistence (runtime only, not committed)
+*.json

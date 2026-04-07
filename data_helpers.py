@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
+import os
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -1112,4 +1115,659 @@ def run_monte_carlo_matchup(
         'lambda_a': round(lambda_a, 4),
         'lambda_b': round(lambda_b, 4),
         'model_inputs_used': inputs_used,
+    }
+
+# ---------------------------------------------------------------------------
+# Live Feed: Run-Expectancy Matrix (standard 24-state, average 2015-2023)
+# ---------------------------------------------------------------------------
+
+# Keys: (runners_on_base_tuple_sorted, outs) -> expected_runs
+# runners: frozenset of '1B', '2B', '3B'
+_RE24_MATRIX: dict[tuple[frozenset, int], float] = {
+    (frozenset(), 0): 0.481,
+    (frozenset(), 1): 0.254,
+    (frozenset(), 2): 0.098,
+    (frozenset({'1B'}), 0): 0.859,
+    (frozenset({'1B'}), 1): 0.509,
+    (frozenset({'1B'}), 2): 0.224,
+    (frozenset({'2B'}), 0): 1.100,
+    (frozenset({'2B'}), 1): 0.664,
+    (frozenset({'2B'}), 2): 0.319,
+    (frozenset({'3B'}), 0): 1.352,
+    (frozenset({'3B'}), 1): 0.950,
+    (frozenset({'3B'}), 2): 0.353,
+    (frozenset({'1B', '2B'}), 0): 1.437,
+    (frozenset({'1B', '2B'}), 1): 0.884,
+    (frozenset({'1B', '2B'}), 2): 0.429,
+    (frozenset({'1B', '3B'}), 0): 1.784,
+    (frozenset({'1B', '3B'}), 1): 1.089,
+    (frozenset({'1B', '3B'}), 2): 0.478,
+    (frozenset({'2B', '3B'}), 0): 1.964,
+    (frozenset({'2B', '3B'}), 1): 1.389,
+    (frozenset({'2B', '3B'}), 2): 0.580,
+    (frozenset({'1B', '2B', '3B'}), 0): 2.292,
+    (frozenset({'1B', '2B', '3B'}), 1): 1.541,
+    (frozenset({'1B', '2B', '3B'}), 2): 0.752,
+}
+
+
+def _runner_key(runners: list[str]) -> frozenset:
+    """Normalize runner list to frozenset of base labels."""
+    mapping = {'1': '1B', '2': '2B', '3': '3B',
+               '1B': '1B', '2B': '2B', '3B': '3B',
+               'first': '1B', 'second': '2B', 'third': '3B'}
+    normalized = set()
+    for r in (runners or []):
+        k = mapping.get(str(r), '')
+        if k:
+            normalized.add(k)
+    return frozenset(normalized)
+
+
+def _re24_lookup(runners: list[str], outs: int) -> float:
+    key = (_runner_key(runners), max(0, min(2, outs)))
+    return _RE24_MATRIX.get(key, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Live Feed: Player Impact Accumulator (per play, per player)
+# ---------------------------------------------------------------------------
+
+def _accumulate_player_impact(plays: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """
+    Accumulate Game Impact Scores for each player across all plays.
+    Returns dict: {player_id: {name, wpa, re24, run_value, events, ...}}
+    """
+    players: dict[int, dict[str, Any]] = {}
+
+    def _ensure(pid: int, name: str, role: str) -> dict[str, Any]:
+        if pid not in players:
+            players[pid] = {
+                'id': pid, 'name': name, 'role': role,
+                'wpa': 0.0, 're24': 0.0, 'run_value': 0, 'events': [],
+                'rbi': 0, 'outs_recorded': 0, 'strikeouts_p': 0,
+                'baserunners_allowed': 0, 'er_allowed': 0,
+            }
+        return players[pid]
+
+    for play in plays:
+        batter_id = play.get('batter_id', 0)
+        pitcher_id = play.get('pitcher_id', 0)
+        batter_name = play.get('batter_name', 'Unknown')
+        pitcher_name = play.get('pitcher_name', 'Unknown')
+        event = (play.get('event') or '').lower()
+        event_type = (play.get('event_type') or '').lower()
+
+        # Official WPA from feed
+        raw_wpa = play.get('win_probability_added')
+        wpa = 0.0 if raw_wpa is None else float(raw_wpa)
+
+        # RE24
+        outs_before = coerce_int(play.get('outs_before'), 0)
+        outs_after = coerce_int(play.get('outs_after'), outs_before)
+        start_runners = play.get('start_runners') or []
+        end_runners = play.get('end_runners') or []
+        re_before = _re24_lookup(start_runners, outs_before)
+        re_after = _re24_lookup(end_runners, outs_after)
+        runs_scored = max(0, coerce_int(play.get('rbi'), 0))
+        re24 = (re_after + runs_scored) - re_before
+
+        run_value = coerce_int(play.get('rbi'), 0)
+
+        # Batter
+        if batter_id > 0:
+            bd = _ensure(batter_id, batter_name, 'Hitter')
+            bd['wpa'] += wpa
+            bd['re24'] += re24
+            bd['run_value'] += run_value
+            bd['rbi'] += run_value
+            if event in ('home_run', 'single', 'double', 'triple'):
+                bd['events'].append(event)
+
+        # Pitcher (inverse WPA — pitcher benefits when batter's WPA is negative)
+        if pitcher_id > 0:
+            pd_p = _ensure(pitcher_id, pitcher_name, 'Pitcher')
+            pd_p['wpa'] -= wpa   # pitcher earns negative of batter's WPA
+            pd_p['re24'] -= re24
+            outs_delta = max(0, outs_after - outs_before)
+            pd_p['outs_recorded'] += outs_delta
+            if event_type in ('strikeout',):
+                pd_p['strikeouts_p'] += 1
+            if event in ('single', 'double', 'triple', 'home_run', 'walk', 'intent_walk', 'hit_by_pitch'):
+                pd_p['baserunners_allowed'] += 1
+            if event in ('home_run',):
+                pd_p['er_allowed'] += 1
+
+    return players
+
+
+def _game_impact_score(player: dict[str, Any]) -> float:
+    """Compute a 0-100 Game Impact Score from accumulated stats."""
+    wpa = coerce_float(player.get('wpa'), 0.0)
+    re24 = coerce_float(player.get('re24'), 0.0)
+    run_value = coerce_float(player.get('run_value'), 0.0)
+    role = player.get('role', 'Hitter')
+
+    # Normalize each component into a rough 0-1 range
+    wpa_norm = max(-1.0, min(1.0, wpa / 0.5))         # WPA typically -0.5 to 0.5 per play
+    re24_norm = max(-1.0, min(1.0, re24 / 3.0))        # RE24 typically -3 to +3
+    rv_norm = max(-1.0, min(1.0, run_value / 5.0))     # run value typically 0-5
+
+    if role == 'Pitcher':
+        outs = coerce_float(player.get('outs_recorded'), 0.0)
+        k_p = coerce_float(player.get('strikeouts_p'), 0.0)
+        br = coerce_float(player.get('baserunners_allowed'), 0.0)
+        outs_norm = min(1.0, outs / 18.0)
+        k_norm = min(1.0, k_p / 9.0)
+        br_penalty = max(-1.0, -br / 6.0)
+        score = (0.50 * wpa_norm + 0.25 * re24_norm + 0.10 * outs_norm +
+                 0.05 * k_norm + 0.05 * br_penalty + 0.05 * rv_norm)
+    else:
+        score = (0.55 * wpa_norm + 0.25 * re24_norm + 0.15 * rv_norm + 0.05 * 0.0)
+
+    # Scale to 0-100 with 50 as neutral
+    return max(0.0, min(100.0, round(50.0 + score * 50.0, 2)))
+
+
+# ---------------------------------------------------------------------------
+# Live Feed: Player of the Game
+# ---------------------------------------------------------------------------
+
+def build_live_player_of_game(
+    game_feed: dict[str, Any],
+    boxscore: dict[str, Any],
+    plays: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compute Player of the Game using Game Impact Score.
+
+    Returns a dict with keys:
+        player_id, name, team, role, stat_line, game_impact_score,
+        wpa, re24, summary, headshot_url
+    """
+    _empty: dict[str, Any] = {
+        'player_id': 0, 'name': 'N/A', 'team': '', 'role': '',
+        'stat_line': {}, 'game_impact_score': 0.0,
+        'wpa': 0.0, 're24': 0.0, 'summary': 'No data available.',
+        'headshot_url': '',
+    }
+    if not plays:
+        return _empty
+
+    accumulated = _accumulate_player_impact(plays)
+    if not accumulated:
+        return _empty
+
+    # Score each player
+    scored = []
+    for pid, pdata in accumulated.items():
+        gs = _game_impact_score(pdata)
+        scored.append((gs, pdata['wpa'], pdata['re24'], pid, pdata))
+
+    # Sort: GIS desc, then WPA desc, then RE24 desc
+    scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    if not scored:
+        return _empty
+
+    best_gs, best_wpa, best_re24, best_id, best_player = scored[0]
+
+    # Find team for this player from boxscore
+    team_name = ''
+    stat_line: dict[str, Any] = {}
+    role = best_player.get('role', 'Hitter')
+    away_team = (game_feed.get('gameData') or {}).get('teams', {}).get('away', {}).get('name', '')
+    home_team = (game_feed.get('gameData') or {}).get('teams', {}).get('home', {}).get('name', '')
+
+    if boxscore:
+        for side in ('away', 'home'):
+            batters = boxscore.get(f'{side}_batters') or []
+            pitchers = boxscore.get(f'{side}_pitchers') or []
+            for b in batters:
+                if b.get('id') == best_id:
+                    team_name = away_team if side == 'away' else home_team
+                    stat_line = {
+                        'AB': b.get('ab', 0), 'R': b.get('r', 0),
+                        'H': b.get('h', 0), 'RBI': b.get('rbi', 0),
+                        'BB': b.get('bb', 0), 'K': b.get('k', 0),
+                        'HR': b.get('hr', 0), 'SB': b.get('sb', 0),
+                        'TB': b.get('tb', 0),
+                    }
+                    role = 'Hitter'
+                    break
+            for p in pitchers:
+                if p.get('id') == best_id:
+                    team_name = away_team if side == 'away' else home_team
+                    ip_str = str(p.get('ip', '0.0'))
+                    stat_line = {
+                        'IP': ip_str, 'H': p.get('h', 0), 'R': p.get('r', 0),
+                        'ER': p.get('er', 0), 'BB': p.get('bb', 0), 'K': p.get('k', 0),
+                        'HR': p.get('hr', 0),
+                        'PC-ST': f"{p.get('pitches', 0)}-{p.get('strikes', 0)}",
+                        'ERA': p.get('era', '-.--'),
+                    }
+                    outs = coerce_float(best_player.get('outs_recorded'), 0.0)
+                    role = 'Starter' if outs >= 9 else 'Reliever'
+                    break
+            if team_name:
+                break
+
+    # Summary sentence
+    name = best_player.get('name', 'Unknown')
+    if role == 'Hitter':
+        h_val = stat_line.get('H', 0)
+        rbi_val = stat_line.get('RBI', 0)
+        hr_val = stat_line.get('HR', 0)
+        hr_part = f' with {hr_val} HR' if hr_val else ''
+        summary = (
+            f"{name} led the offense with {h_val} hit(s), {rbi_val} RBI{hr_part}, "
+            f"posting a Game Impact Score of {best_gs:.1f}."
+        )
+    else:
+        ip_val = stat_line.get('IP', '0.0')
+        k_val = stat_line.get('K', 0)
+        er_val = stat_line.get('ER', 0)
+        summary = (
+            f"{name} ({role}) dominated with {ip_val} IP, {k_val} K, {er_val} ER, "
+            f"earning a Game Impact Score of {best_gs:.1f}."
+        )
+
+    headshot_url = f'https://img.mlbstatic.com/mlb-photos/image/upload/w_213,q_auto:best/v1/people/{best_id}/headshot/67/current'
+
+    return {
+        'player_id': best_id,
+        'name': name,
+        'team': team_name,
+        'role': role,
+        'stat_line': stat_line,
+        'game_impact_score': best_gs,
+        'wpa': round(best_wpa, 4),
+        're24': round(best_re24, 3),
+        'summary': summary,
+        'headshot_url': headshot_url,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Live Feed: Play of the Game
+# ---------------------------------------------------------------------------
+
+def build_live_play_of_game(
+    game_feed: dict[str, Any],
+    plays: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Find the Play of the Game: largest WPA swing for the winning side.
+
+    Returns a dict with keys:
+        inning, half_inning, outs, start_runners, score_before,
+        score_after, batter, pitcher, event, description, wpa,
+        re24, narrative, runner_ups
+    """
+    _empty: dict[str, Any] = {
+        'inning': 0, 'half_inning': '', 'outs': 0, 'start_runners': [],
+        'score_before': '0-0', 'score_after': '0-0',
+        'batter': 'N/A', 'pitcher': 'N/A', 'event': '', 'description': '',
+        'wpa': 0.0, 're24': 0.0, 'narrative': 'No play data available.',
+        'runner_ups': [],
+    }
+    if not plays:
+        return _empty
+
+    # Compute per-play RE24 and WPA swings
+    play_scores: list[dict[str, Any]] = []
+    for play in plays:
+        raw_wpa = play.get('win_probability_added')
+        wpa = 0.0 if raw_wpa is None else float(raw_wpa)
+
+        outs_before = coerce_int(play.get('outs_before'), 0)
+        outs_after = coerce_int(play.get('outs_after'), outs_before)
+        start_runners = play.get('start_runners') or []
+        end_runners = play.get('end_runners') or []
+        re_before = _re24_lookup(start_runners, outs_before)
+        re_after = _re24_lookup(end_runners, outs_after)
+        runs_scored = max(0, coerce_int(play.get('rbi'), 0))
+        re24 = (re_after + runs_scored) - re_before
+
+        # Compute a leverage proxy
+        inning = coerce_int(play.get('inning'), 1)
+        leverage_bonus = max(0, (inning - 6) * 0.1)
+
+        away_after = coerce_int(play.get('away_score_after'), 0)
+        home_after = coerce_int(play.get('home_score_after'), 0)
+        score_diff_abs = abs(away_after - home_after)
+        close_game_bonus = 0.2 if score_diff_abs <= 2 else 0.0
+
+        composite = abs(wpa) + 0.3 * abs(re24) + leverage_bonus + close_game_bonus
+
+        play_scores.append({
+            'play': play,
+            'wpa': wpa,
+            're24': re24,
+            'composite': composite,
+        })
+
+    # Sort by composite descending, then WPA swing, then RE24
+    play_scores.sort(key=lambda x: (x['composite'], abs(x['wpa']), abs(x['re24']), x['play']['inning']), reverse=True)
+
+    if not play_scores:
+        return _empty
+
+    def _format_play(ps: dict[str, Any]) -> dict[str, Any]:
+        p = ps['play']
+        runners_map = {'1B': '1st', '2B': '2nd', '3B': '3rd'}
+        runners_str = ', '.join([runners_map.get(r, r) for r in (p.get('start_runners') or [])])
+        away_after = coerce_int(p.get('away_score_after'), 0)
+        home_after = coerce_int(p.get('home_score_after'), 0)
+        rbi = coerce_int(p.get('rbi'), 0)
+        if p.get('half_inning') == 'top':
+            away_before = away_after - rbi
+            home_before = home_after
+        else:
+            away_before = away_after
+            home_before = home_after - rbi
+        score_before = f"{away_before}-{home_before}"
+        score_after = f"{away_after}-{home_after}"
+        outs = coerce_int(p.get('outs_before'), 0)
+        inning = coerce_int(p.get('inning'), 0)
+        half = p.get('half_inning', '')
+        half_label = 'Top' if half == 'top' else 'Bot'
+        inning_str = f"{half_label} {inning}"
+        runners_label = runners_str if runners_str else 'bases empty'
+        outs_label = f"{outs} out{'s' if outs != 1 else ''}"
+        batter = p.get('batter_name', 'Unknown')
+        pitcher = p.get('pitcher_name', 'Unknown')
+        event = p.get('event', '')
+        desc = p.get('description', '')
+        wpa_val = ps['wpa']
+        re24_val = ps['re24']
+        wpa_sign = f"+{wpa_val:.3f}" if wpa_val >= 0 else f"{wpa_val:.3f}"
+        narrative = (
+            f"{inning_str}, {score_before} score, {outs_label}, {runners_label}: "
+            f"{batter} — {event}. "
+            f"Score became {score_after}. "
+            f"WPA: {wpa_sign}, RE24: {re24_val:+.2f}."
+        )
+        return {
+            'inning': inning,
+            'half_inning': half,
+            'outs': outs,
+            'start_runners': p.get('start_runners') or [],
+            'score_before': score_before,
+            'score_after': score_after,
+            'batter': batter,
+            'pitcher': pitcher,
+            'event': event,
+            'description': desc,
+            'wpa': round(wpa_val, 4),
+            're24': round(re24_val, 3),
+            'narrative': narrative,
+        }
+
+    top = _format_play(play_scores[0])
+    runner_ups = [_format_play(play_scores[i]) for i in range(1, min(3, len(play_scores)))]
+    top['runner_ups'] = runner_ups
+    return top
+
+
+# ---------------------------------------------------------------------------
+# Live Feed: HTML/CSS Scorecard Renderer
+# ---------------------------------------------------------------------------
+
+def render_scorecard_html(scorecard: dict[str, Any]) -> str:
+    """Build a custom HTML scorecard similar to the reference site."""
+    if not scorecard:
+        return '<p style="color:#aaa">No scorecard data available.</p>'
+
+    away_team = scorecard.get('away_team', 'Away')
+    home_team = scorecard.get('home_team', 'Home')
+    away_abbr = scorecard.get('away_abbr', 'AWY')
+    home_abbr = scorecard.get('home_abbr', 'HME')
+    away_id = scorecard.get('away_id', 0)
+    home_id = scorecard.get('home_id', 0)
+    innings = scorecard.get('innings') or []
+    away_runs = scorecard.get('away_runs', 0)
+    away_hits = scorecard.get('away_hits', 0)
+    away_errors = scorecard.get('away_errors', 0)
+    home_runs = scorecard.get('home_runs', 0)
+    home_hits = scorecard.get('home_hits', 0)
+    home_errors = scorecard.get('home_errors', 0)
+    status = scorecard.get('status', '')
+    abstract = scorecard.get('abstract_status', '')
+    inning_state = scorecard.get('inning_state', '')
+    cur_inning_ord = scorecard.get('current_inning_ordinal', '')
+    game_date = scorecard.get('gameDate', '')
+    venue = scorecard.get('venue', '')
+    balls = scorecard.get('balls', 0)
+    strikes = scorecard.get('strikes', 0)
+    outs = scorecard.get('outs', 0)
+    on_1b = scorecard.get('on_1b', False)
+    on_2b = scorecard.get('on_2b', False)
+    on_3b = scorecard.get('on_3b', False)
+    cur_batter = scorecard.get('current_batter', '')
+    cur_pitcher = scorecard.get('current_pitcher', '')
+
+    # Determine max innings to show (at least 9)
+    max_inning = max(9, len(innings))
+
+    # Status color
+    if abstract == 'Live' or 'Progress' in status:
+        status_color = '#27AE60'
+        status_label = f'🔴 LIVE — {inning_state} {cur_inning_ord}'
+    elif abstract == 'Final' or 'Final' in status:
+        status_color = '#E74C3C'
+        status_label = '✅ FINAL'
+    else:
+        status_color = '#F39C12'
+        status_label = f'��️ {status}'
+
+    # Build innings dict for quick lookup
+    away_inning_map: dict[int, str] = {}
+    home_inning_map: dict[int, str] = {}
+    for inn in innings:
+        n = inn.get('inning', 0)
+        a = inn.get('away', '-')
+        h = inn.get('home', '-')
+        away_inning_map[n] = str(a) if a is not None else '-'
+        home_inning_map[n] = str(h) if h is not None else '-'
+
+    # Inning column headers
+    inning_headers = ''.join(f'<th style="min-width:30px;text-align:center">{i}</th>' for i in range(1, max_inning + 1))
+
+    # Away row innings
+    away_cells = ''
+    for i in range(1, max_inning + 1):
+        val = away_inning_map.get(i, '')
+        if val == '' or val == 'None':
+            val = ''
+        away_cells += f'<td style="text-align:center;color:#ccc">{val}</td>'
+
+    # Home row innings
+    home_cells = ''
+    for i in range(1, max_inning + 1):
+        val = home_inning_map.get(i, '')
+        if val == '' or val == 'None':
+            val = ''
+        home_cells += f'<td style="text-align:center;color:#ccc">{val}</td>'
+
+    # Logo URLs
+    away_logo = f'https://www.mlbstatic.com/team-logos/{away_id}.svg' if away_id else ''
+    home_logo = f'https://www.mlbstatic.com/team-logos/{home_id}.svg' if home_id else ''
+
+    def logo_img(url: str, size: int = 28) -> str:
+        if url:
+            return f'<img src="{url}" style="height:{size}px;vertical-align:middle;margin-right:6px">'
+        return ''
+
+    # Baserunner diamond
+    def base_circle(occupied: bool) -> str:
+        color = '#F39C12' if occupied else '#444'
+        return f'<div style="width:14px;height:14px;background:{color};border:1px solid #888;transform:rotate(45deg);display:inline-block;margin:2px"></div>'
+
+    html = f"""
+<div style="background:#1a1a2e;border-radius:12px;padding:18px;font-family:'Segoe UI',Arial,sans-serif;color:#f0f0f0;max-width:900px">
+  <!-- Header -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div>
+      <span style="font-size:0.85rem;color:#aaa">{game_date} &nbsp;|&nbsp; {venue}</span>
+    </div>
+    <div style="background:#222;border-radius:6px;padding:4px 12px;font-size:0.9rem;font-weight:bold;color:{status_color}">
+      {status_label}
+    </div>
+  </div>
+
+  <!-- Scorecard Table -->
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:0.88rem">
+    <thead>
+      <tr style="background:#111;color:#aaa">
+        <th style="text-align:left;padding:6px 8px;min-width:140px">Team</th>
+        {inning_headers}
+        <th style="text-align:center;min-width:30px;color:#fff;font-weight:bold">R</th>
+        <th style="text-align:center;min-width:30px;color:#fff">H</th>
+        <th style="text-align:center;min-width:30px;color:#fff">E</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="border-bottom:1px solid #333">
+        <td style="padding:8px;font-weight:bold">{logo_img(away_logo)}{away_abbr} <span style="font-size:0.78rem;color:#aaa">{away_team}</span></td>
+        {away_cells}
+        <td style="text-align:center;font-weight:bold;font-size:1.1rem;color:#fff">{away_runs}</td>
+        <td style="text-align:center;color:#ccc">{away_hits}</td>
+        <td style="text-align:center;color:#E74C3C">{away_errors}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px;font-weight:bold">{logo_img(home_logo)}{home_abbr} <span style="font-size:0.78rem;color:#aaa">{home_team}</span></td>
+        {home_cells}
+        <td style="text-align:center;font-weight:bold;font-size:1.1rem;color:#fff">{home_runs}</td>
+        <td style="text-align:center;color:#ccc">{home_hits}</td>
+        <td style="text-align:center;color:#E74C3C">{home_errors}</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+"""
+
+    # Live situation panel
+    if abstract == 'Live' or 'Progress' in status:
+        first_row = base_circle(on_3b) + '&nbsp;'
+        second_row = base_circle(on_1b) + '&nbsp;' + base_circle(on_2b)
+        html += f"""
+  <!-- Live Situation -->
+  <div style="display:flex;gap:20px;margin-top:14px;flex-wrap:wrap">
+    <div style="background:#111;border-radius:8px;padding:10px 16px;min-width:160px">
+      <div style="color:#aaa;font-size:0.78rem;margin-bottom:4px">COUNT</div>
+      <div style="font-size:1.1rem;font-weight:bold">
+        <span style="color:#27AE60">{balls}</span>
+        -
+        <span style="color:#E74C3C">{strikes}</span>
+        &nbsp;<span style="color:#888;font-size:0.9rem">{outs} out{'s' if outs != 1 else ''}</span>
+      </div>
+    </div>
+    <div style="background:#111;border-radius:8px;padding:10px 16px;min-width:120px">
+      <div style="color:#aaa;font-size:0.78rem;margin-bottom:4px">BASERUNNERS</div>
+      <div style="font-size:0.9rem">
+        <div style="text-align:center">{first_row}</div>
+        <div style="text-align:center">{second_row}</div>
+      </div>
+    </div>
+    <div style="background:#111;border-radius:8px;padding:10px 16px;min-width:180px">
+      <div style="color:#aaa;font-size:0.78rem;margin-bottom:4px">AT BAT / PITCHING</div>
+      <div style="font-size:0.85rem">
+        🏏 <b>{cur_batter or '—'}</b><br>
+        ⚾ {cur_pitcher or '—'}
+      </div>
+    </div>
+  </div>
+"""
+
+    html += '</div>'
+    return html
+
+
+# ---------------------------------------------------------------------------
+# Live Feed: Frozen state persistence
+# ---------------------------------------------------------------------------
+
+_FROZEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.frozen_states')
+
+
+def _ensure_frozen_dir() -> None:
+    os.makedirs(_FROZEN_DIR, exist_ok=True)
+
+
+def _frozen_path(team_id: int) -> str:
+    return os.path.join(_FROZEN_DIR, f'team_{team_id}.json')
+
+
+def load_frozen_game_state(team_id: int) -> dict[str, Any] | None:
+    """Load frozen game state from JSON file. Returns None if not found."""
+    path = _frozen_path(team_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_frozen_game_state(team_id: int, snapshot: dict[str, Any]) -> bool:
+    """Persist game snapshot to JSON. Returns True on success."""
+    _ensure_frozen_dir()
+    path = _frozen_path(team_id)
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(snapshot, f, default=str, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def should_replace_frozen_state(old_snapshot: dict[str, Any] | None, current_game: dict[str, Any]) -> bool:
+    """Return True if the current game should replace the frozen snapshot.
+
+    Rules:
+    - If no frozen state: always True
+    - If frozen state is from a different gamePk: True only if current is live/started
+    - If same gamePk but current is now Final and frozen wasn't: True
+    - If current game has 'live' phase: True (keep updating while live)
+    - Otherwise: False (keep frozen)
+    """
+    if old_snapshot is None:
+        return True
+    old_pk = old_snapshot.get('gamePk')
+    new_pk = current_game.get('gamePk')
+    old_status = old_snapshot.get('status', '')
+    new_phase = current_game.get('game_phase', 'none')
+    new_abstract = current_game.get('abstract_status', '')
+
+    if old_pk != new_pk:
+        # Different game — only replace if new game is actually live
+        return new_phase == 'live'
+    # Same game
+    if new_phase == 'live':
+        return True
+    if new_abstract == 'Final' and 'final' not in old_status.lower():
+        return True
+    return False
+
+
+def build_frozen_snapshot(
+    team_id: int,
+    game_info: dict[str, Any],
+    scorecard: dict[str, Any],
+    player_of_game: dict[str, Any],
+    play_of_game: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a frozen state snapshot dict."""
+    return {
+        'team_id': team_id,
+        'gamePk': game_info.get('gamePk', 0),
+        'game_date': game_info.get('officialDate', game_info.get('gameDate', '')),
+        'status': scorecard.get('status', game_info.get('status', '')),
+        'abstract_status': scorecard.get('abstract_status', game_info.get('abstract_status', '')),
+        'away_team': scorecard.get('away_team', ''),
+        'home_team': scorecard.get('home_team', ''),
+        'scorecard': scorecard,
+        'player_of_game': player_of_game,
+        'play_of_game': play_of_game,
+        'frozen_at': datetime.now(timezone.utc).isoformat(),
     }

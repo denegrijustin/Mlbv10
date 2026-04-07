@@ -572,3 +572,379 @@ def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_
         return out, None
     except Exception as exc:
         return pd.DataFrame(), str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Live game helpers (Live Feed)
+# ---------------------------------------------------------------------------
+
+def get_current_team_game(team_id: int) -> tuple[dict[str, Any], str | None]:
+    """Find the current live game, most recent completed game, or next scheduled
+    game for a team.
+
+    Returns a dict with keys: gamePk, gameDate, officialDate, away, home,
+    away_id, home_id, away_score, home_score, status, abstract_status,
+    and a 'game_phase' key ('live', 'final', 'scheduled', or 'none').
+    """
+    from datetime import date, timedelta
+    today = date.today().isoformat()
+    client = MLBClient()
+    empty: dict[str, Any] = {}
+
+    # 1. Check today's schedule
+    try:
+        games_today = client.get_schedule({
+            'sportId': 1, 'date': today, 'teamId': team_id, 'hydrate': 'team',
+        })
+        df_today = _games_to_df(games_today)
+        if not df_today.empty:
+            live_statuses = {'In Progress', 'Manager Challenge', 'Delayed', 'Delayed Start', 'Suspended'}
+            live_rows = df_today[df_today['status'].isin(live_statuses)]
+            if not live_rows.empty:
+                row = live_rows.iloc[0].to_dict()
+                row['game_phase'] = 'live'
+                return row, None
+            final_rows = df_today[df_today['abstract_status'] == 'Final']
+            if not final_rows.empty:
+                row = final_rows.iloc[-1].to_dict()
+                row['game_phase'] = 'final'
+                return row, None
+            sched_rows = df_today[df_today['abstract_status'] == 'Preview']
+            if not sched_rows.empty:
+                row = sched_rows.iloc[0].to_dict()
+                row['game_phase'] = 'scheduled'
+                return row, None
+            # Any game today
+            row = df_today.iloc[0].to_dict()
+            row['game_phase'] = 'scheduled'
+            return row, None
+    except Exception:
+        pass
+
+    # 2. Fallback: most recent final game (last 7 days)
+    try:
+        start_lookback = (date.fromisoformat(today) - timedelta(days=7)).isoformat()
+        games_recent = client.get_schedule({
+            'sportId': 1, 'teamId': team_id,
+            'startDate': start_lookback, 'endDate': today,
+            'gameType': 'R', 'hydrate': 'team',
+        })
+        df_recent = _games_to_df(games_recent)
+        if not df_recent.empty:
+            finals = df_recent[df_recent['abstract_status'] == 'Final']
+            if not finals.empty:
+                row = finals.iloc[-1].to_dict()
+                row['game_phase'] = 'final'
+                return row, None
+    except Exception:
+        pass
+
+    # 3. Next scheduled game (7 days ahead)
+    try:
+        end_look = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
+        games_next = client.get_schedule({
+            'sportId': 1, 'teamId': team_id,
+            'startDate': today, 'endDate': end_look,
+            'gameType': 'R', 'hydrate': 'team',
+        })
+        df_next = _games_to_df(games_next)
+        if not df_next.empty:
+            sched = df_next[df_next['abstract_status'] != 'Final']
+            if not sched.empty:
+                row = sched.iloc[0].to_dict()
+                row['game_phase'] = 'scheduled'
+                return row, None
+    except Exception:
+        pass
+
+    return empty, 'No current game found for team.'
+
+
+def get_game_status(game_pk: int) -> tuple[str, str | None]:
+    """Return (detailedState, error_or_None) for a game."""
+    if not game_pk:
+        return 'Unknown', 'No gamePk provided.'
+    client = MLBClient()
+    try:
+        data = client.get_live_feed(game_pk)
+        state = (data.get('gameData', {}).get('status') or {}).get('detailedState', 'Unknown')
+        return clean_text(state, 'Unknown'), None
+    except Exception as exc:
+        return 'Unknown', str(exc)
+
+
+def get_live_scorecard(game_pk: int) -> tuple[dict[str, Any], str | None]:
+    """Return a full parsed scorecard dict from the live feed.
+
+    Returned keys:
+        gamePk, gameDate, venue, away_team, home_team, away_abbr, home_abbr,
+        away_id, home_id, status, abstract_status, inning_state,
+        current_inning, innings (list of {inning, away, home}),
+        away_runs, away_hits, away_errors,
+        home_runs, home_hits, home_errors,
+        balls, strikes, outs,
+        on_1b, on_2b, on_3b,
+        current_batter, current_pitcher,
+        recent_plays (list of str)
+    """
+    if not game_pk:
+        return {}, 'No gamePk provided.'
+    client = MLBClient()
+    try:
+        data = client.get_live_feed(game_pk)
+        game_data = data.get('gameData') or {}
+        live_data = data.get('liveData') or {}
+        linescore = live_data.get('linescore') or {}
+        teams_gd = game_data.get('teams') or {}
+        away_gd = teams_gd.get('away') or {}
+        home_gd = teams_gd.get('home') or {}
+        status_obj = game_data.get('status') or {}
+        venue_obj = game_data.get('venue') or {}
+        datetime_obj = game_data.get('datetime') or {}
+
+        # Innings
+        innings_raw = linescore.get('innings') or []
+        innings: list[dict[str, Any]] = []
+        for inn in innings_raw:
+            away_inn = inn.get('away') or {}
+            home_inn = inn.get('home') or {}
+            innings.append({
+                'inning': coerce_int(inn.get('num'), 0),
+                'away': away_inn.get('runs') if away_inn.get('runs') is not None else '-',
+                'home': home_inn.get('runs') if home_inn.get('runs') is not None else '-',
+            })
+
+        # Team totals
+        ls_teams = linescore.get('teams') or {}
+        ls_away = ls_teams.get('away') or {}
+        ls_home = ls_teams.get('home') or {}
+
+        # Baserunners
+        offense = linescore.get('offense') or {}
+        on_1b = bool(offense.get('first'))
+        on_2b = bool(offense.get('second'))
+        on_3b = bool(offense.get('third'))
+        cur_batter = (offense.get('batter') or {}).get('fullName', '')
+        cur_pitcher = (linescore.get('defense') or {}).get('pitcher', {}) if isinstance(linescore.get('defense'), dict) else {}
+        cur_pitcher_name = cur_pitcher.get('fullName', '') if isinstance(cur_pitcher, dict) else ''
+
+        # Recent plays
+        plays_obj = live_data.get('plays') or {}
+        all_plays_raw = plays_obj.get('allPlays') or []
+        recent_plays: list[str] = []
+        for p in all_plays_raw[-10:]:
+            result = (p.get('result') or {})
+            desc = clean_text(result.get('description'), '')
+            if desc:
+                recent_plays.append(desc)
+
+        scorecard: dict[str, Any] = {
+            'gamePk': game_pk,
+            'gameDate': clean_text(datetime_obj.get('officialDate') or game_data.get('game', {}).get('id', ''), ''),
+            'venue': clean_text(venue_obj.get('name'), 'Unknown Venue'),
+            'away_team': clean_text(away_gd.get('name'), 'Away'),
+            'home_team': clean_text(home_gd.get('name'), 'Home'),
+            'away_abbr': clean_text((away_gd.get('teamCode') or away_gd.get('abbreviation')), 'AWY'),
+            'home_abbr': clean_text((home_gd.get('teamCode') or home_gd.get('abbreviation')), 'HME'),
+            'away_id': coerce_int(away_gd.get('id'), 0),
+            'home_id': coerce_int(home_gd.get('id'), 0),
+            'status': clean_text(status_obj.get('detailedState'), 'Unknown'),
+            'abstract_status': clean_text(status_obj.get('abstractGameState'), 'Unknown'),
+            'inning_state': clean_text(linescore.get('inningState'), ''),
+            'current_inning': coerce_int(linescore.get('currentInning'), 0),
+            'current_inning_ordinal': clean_text(linescore.get('currentInningOrdinal'), ''),
+            'innings': innings,
+            'away_runs': coerce_int(ls_away.get('runs'), 0),
+            'away_hits': coerce_int(ls_away.get('hits'), 0),
+            'away_errors': coerce_int(ls_away.get('errors'), 0),
+            'home_runs': coerce_int(ls_home.get('runs'), 0),
+            'home_hits': coerce_int(ls_home.get('hits'), 0),
+            'home_errors': coerce_int(ls_home.get('errors'), 0),
+            'balls': coerce_int(linescore.get('balls'), 0),
+            'strikes': coerce_int(linescore.get('strikes'), 0),
+            'outs': coerce_int(linescore.get('outs'), 0),
+            'on_1b': on_1b,
+            'on_2b': on_2b,
+            'on_3b': on_3b,
+            'current_batter': clean_text(cur_batter, ''),
+            'current_pitcher': clean_text(cur_pitcher_name, ''),
+            'recent_plays': recent_plays,
+        }
+        return scorecard, None
+    except Exception as exc:
+        return {}, str(exc)
+
+
+def get_game_plays(game_pk: int) -> tuple[list[dict[str, Any]], str | None]:
+    """Return parsed play-by-play list from live feed.
+
+    Each play dict has keys: idx, inning, half_inning, outs_before, outs_after,
+    balls, strikes, batter_id, batter_name, pitcher_id, pitcher_name,
+    event, description, rbi, score_change, away_score_after, home_score_after,
+    wpa (float or None), start_runners, end_runners
+    """
+    if not game_pk:
+        return [], 'No gamePk provided.'
+    client = MLBClient()
+    try:
+        data = client.get_live_feed(game_pk)
+        live_data = data.get('liveData') or {}
+        plays_obj = live_data.get('plays') or {}
+        all_plays_raw = plays_obj.get('allPlays') or []
+        plays: list[dict[str, Any]] = []
+        for idx, p in enumerate(all_plays_raw):
+            about = p.get('about') or {}
+            result = p.get('result') or {}
+            matchup = p.get('matchup') or {}
+            count = p.get('count') or {}
+            runners = p.get('runners') or []
+            batter = matchup.get('batter') or {}
+            pitcher = matchup.get('pitcher') or {}
+
+            # Compute which runners are on base before/after
+            start_runners = set()
+            end_runners = set()
+            for r in runners:
+                mv = r.get('movement') or {}
+                det = r.get('details') or {}
+                start = mv.get('originBase') or ''
+                end_b = mv.get('end') or mv.get('endBase') or ''
+                if start:
+                    start_runners.add(start)
+                if end_b and end_b not in ('score', 'Score'):
+                    end_runners.add(end_b)
+
+            play_dict: dict[str, Any] = {
+                'idx': idx,
+                'inning': coerce_int(about.get('inning'), 0),
+                'half_inning': clean_text(about.get('halfInning'), 'top'),
+                'outs_before': coerce_int(about.get('outs'), 0),
+                'outs_after': coerce_int(count.get('outs'), 0),
+                'balls': coerce_int(count.get('balls'), 0),
+                'strikes': coerce_int(count.get('strikes'), 0),
+                'batter_id': coerce_int(batter.get('id'), 0),
+                'batter_name': clean_text(batter.get('fullName'), 'Unknown'),
+                'pitcher_id': coerce_int(pitcher.get('id'), 0),
+                'pitcher_name': clean_text(pitcher.get('fullName'), 'Unknown'),
+                'event': clean_text(result.get('event'), ''),
+                'event_type': clean_text(result.get('eventType'), ''),
+                'description': clean_text(result.get('description'), ''),
+                'rbi': coerce_int(result.get('rbi'), 0),
+                'away_score_after': coerce_int(result.get('awayScore'), 0),
+                'home_score_after': coerce_int(result.get('homeScore'), 0),
+                'start_runners': sorted(start_runners),
+                'end_runners': sorted(end_runners),
+                'is_scoring_play': bool(about.get('isScoringPlay')),
+                'wpa': None,  # populated by data_helpers
+                'win_probability_added': coerce_float(
+                    (p.get('winProbability') or [{}])[-1].get('homeTeamWinProbabilityAdded') if p.get('winProbability') else None
+                ),
+            }
+            plays.append(play_dict)
+        return plays, None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def get_game_boxscore(game_pk: int) -> tuple[dict[str, Any], str | None]:
+    """Return parsed boxscore dict from the live feed.
+
+    Returned keys:
+        away_batters: list of {id, name, ab, r, h, rbi, bb, k, sb, hr, tb, obp, slg}
+        home_batters: list of {...}
+        away_pitchers: list of {id, name, ip, h, r, er, bb, k, hr, pitches, strikes, era}
+        home_pitchers: list of {...}
+        away_notes: str  (W/L/S if applicable)
+        home_notes: str
+    """
+    if not game_pk:
+        return {}, 'No gamePk provided.'
+    client = MLBClient()
+    try:
+        data = client.get_live_feed(game_pk)
+        live_data = data.get('liveData') or {}
+        boxscore = live_data.get('boxscore') or {}
+        box_teams = boxscore.get('teams') or {}
+
+        def _parse_batters(team_box: dict) -> list[dict[str, Any]]:
+            batters_order = team_box.get('batters') or []
+            players = team_box.get('players') or {}
+            result = []
+            for pid in batters_order:
+                key = f'ID{pid}'
+                p = players.get(key) or {}
+                person = p.get('person') or {}
+                stats = (p.get('stats') or {}).get('batting') or {}
+                season_stats = (p.get('seasonStats') or {}).get('batting') or {}
+                tb = (
+                    coerce_int(stats.get('singles'), 0) * 1 +
+                    coerce_int(stats.get('doubles'), 0) * 2 +
+                    coerce_int(stats.get('triples'), 0) * 3 +
+                    coerce_int(stats.get('homeRuns'), 0) * 4
+                )
+                if tb == 0:
+                    tb = coerce_int(stats.get('totalBases'), 0)
+                result.append({
+                    'id': coerce_int(person.get('id'), pid),
+                    'name': clean_text(person.get('fullName'), 'Unknown'),
+                    'position': clean_text((p.get('position') or {}).get('abbreviation'), ''),
+                    'ab': coerce_int(stats.get('atBats'), 0),
+                    'r': coerce_int(stats.get('runs'), 0),
+                    'h': coerce_int(stats.get('hits'), 0),
+                    'rbi': coerce_int(stats.get('rbi'), 0),
+                    'bb': coerce_int(stats.get('baseOnBalls'), 0),
+                    'k': coerce_int(stats.get('strikeOuts'), 0),
+                    'sb': coerce_int(stats.get('stolenBases'), 0),
+                    'hr': coerce_int(stats.get('homeRuns'), 0),
+                    'tb': tb,
+                    'avg': clean_text(season_stats.get('avg'), '.---'),
+                    'obp': clean_text(season_stats.get('obp'), '.---'),
+                    'slg': clean_text(season_stats.get('slg'), '.---'),
+                })
+            return result
+
+        def _parse_pitchers(team_box: dict) -> list[dict[str, Any]]:
+            pitchers_order = team_box.get('pitchers') or []
+            players = team_box.get('players') or {}
+            result = []
+            for pid in pitchers_order:
+                key = f'ID{pid}'
+                p = players.get(key) or {}
+                person = p.get('person') or {}
+                stats = (p.get('stats') or {}).get('pitching') or {}
+                season_stats = (p.get('seasonStats') or {}).get('pitching') or {}
+                result.append({
+                    'id': coerce_int(person.get('id'), pid),
+                    'name': clean_text(person.get('fullName'), 'Unknown'),
+                    'ip': clean_text(stats.get('inningsPitched'), '0.0'),
+                    'h': coerce_int(stats.get('hits'), 0),
+                    'r': coerce_int(stats.get('runs'), 0),
+                    'er': coerce_int(stats.get('earnedRuns'), 0),
+                    'bb': coerce_int(stats.get('baseOnBalls'), 0),
+                    'k': coerce_int(stats.get('strikeOuts'), 0),
+                    'hr': coerce_int(stats.get('homeRuns'), 0),
+                    'pitches': coerce_int(stats.get('pitchesThrown'), 0),
+                    'strikes': coerce_int(stats.get('strikes'), 0),
+                    'era': clean_text(season_stats.get('era'), '-.--'),
+                    'game_score': None,
+                })
+            return result
+
+        away_box = box_teams.get('away') or {}
+        home_box = box_teams.get('home') or {}
+
+        # Decisions (W/L/S)
+        decisions = boxscore.get('info') or []
+        away_notes = ''
+        home_notes = ''
+
+        return {
+            'away_batters': _parse_batters(away_box),
+            'home_batters': _parse_batters(home_box),
+            'away_pitchers': _parse_pitchers(away_box),
+            'home_pitchers': _parse_pitchers(home_box),
+            'away_notes': away_notes,
+            'home_notes': home_notes,
+        }, None
+    except Exception as exc:
+        return {}, str(exc)
