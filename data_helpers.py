@@ -1838,7 +1838,14 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
             wp_after_raw = None
             if wp_before is not None and about.get('homeWinProbabilityAdded') is not None:
                 try:
-                    wp_after_raw = float(wp_before) + float(about['homeWinProbabilityAdded'])
+                    _wpb = float(wp_before)
+                    _wpa = float(about['homeWinProbabilityAdded'])
+                    # homeWinProbability is 0-100%; homeWinProbabilityAdded may
+                    # be a small decimal (proportion) or already a percentage.
+                    # If WPA magnitude is < 1, treat as proportion and scale up.
+                    if abs(_wpa) < 1.0:
+                        _wpa *= 100.0
+                    wp_after_raw = _wpb + _wpa
                 except (TypeError, ValueError):
                     pass
             wp_part = ''
