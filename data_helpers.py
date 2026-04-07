@@ -1173,6 +1173,13 @@ _DEFENSE_PREMIUM: dict[str, float] = {
 }
 
 
+def _ordinal(n: int) -> str:
+    """Return an integer with its ordinal suffix, e.g. 1 -> '1st'."""
+    if 11 <= (n % 100) <= 13:
+        return f"{n}th"
+    return f"{n}{('th','st','nd','rd')[min(n % 10, 4)] if n % 10 < 4 else 'th'}"
+
+
 def _encode_runners(play: dict) -> str:
     """Convert play's runner / matchup data to a runners code like '1-3' or '---'."""
     matchup = play.get('matchup', {})
@@ -1457,7 +1464,7 @@ def _compute_pitcher_gis(player_data: dict, player_id: int,
     rpc = 0.0
     if is_starter and er == 0 and h <= 3:
         rpc += 0.5
-    if bb > 0 and k / bb >= 3.0:
+    if bb > 0 and k >= 3 * bb:
         rpc += 0.3
     elif bb == 0 and k > 0:
         rpc += 0.4
@@ -1516,8 +1523,10 @@ def _format_pitcher_summary(player: dict[str, Any]) -> str:
     bb = coerce_int(stats.get('baseOnBalls'), 0)
     k = coerce_int(stats.get('strikeOuts'), 0)
     hr = coerce_int(stats.get('homeRuns'), 0)
-    pitches = coerce_int(stats.get('pitchesThrown')
-                         or stats.get('numberOfPitches'), 0)
+    raw_pitches = stats.get('pitchesThrown')
+    if raw_pitches is None:
+        raw_pitches = stats.get('numberOfPitches')
+    pitches = coerce_int(raw_pitches, 0)
     strikes = coerce_int(stats.get('strikes'), 0)
     saves = coerce_int(stats.get('saves'), 0)
     holds = coerce_int(stats.get('holds'), 0)
@@ -1837,7 +1846,7 @@ def build_play_of_game(live_feed_data: dict[str, Any]) -> dict[str, Any] | None:
                            f"{coerce_float(wp_before, 0):.0f}% to {wp_after_raw:.0f}%")
 
             narrative = (
-                f"{half_word} of the {inning}{'th' if inning not in (1,2,3) else ['st','nd','rd'][inning-1]}, "
+                f"{half_word} of the {_ordinal(inning)}, "
                 f"score {score_before} with {outs_word}"
                 f"{' and ' + runners_before if bases else ''}, "
                 f"{batter} {event.replace('_', ' ')}"
