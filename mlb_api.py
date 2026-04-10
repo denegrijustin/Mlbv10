@@ -274,3 +274,192 @@ def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_
         return out, None
     except Exception as exc:
         return pd.DataFrame(), str(exc)
+
+
+# ---------------------------------------------------------------------------
+# League-wide team stat helpers
+# ---------------------------------------------------------------------------
+
+
+def get_league_team_hitting_mlb(season: int) -> tuple[pd.DataFrame, str | None]:
+    """All-team season hitting stats from the MLB Stats API."""
+    client = MLBClient()
+    try:
+        data = client._get('/teams/stats', {
+            'sportId': 1, 'stats': 'season', 'group': 'hitting', 'season': season,
+        })
+        rows: list[dict[str, Any]] = []
+        for stat_block in data.get('stats', []):
+            for split in stat_block.get('splits', []):
+                team = split.get('team', {})
+                s = split.get('stat', {})
+                g = max(coerce_int(s.get('gamesPlayed'), 1), 1)
+                pa = max(coerce_int(s.get('plateAppearances'), 1), 1)
+                runs = coerce_int(s.get('runs'), 0)
+                bb = coerce_int(s.get('baseOnBalls'), 0)
+                so = coerce_int(s.get('strikeOuts'), 0)
+                rows.append({
+                    'Team': clean_text(team.get('name')),
+                    'G': g, 'PA': pa,
+                    'R': runs, 'R/G': round(runs / g, 2),
+                    'HR': coerce_int(s.get('homeRuns'), 0),
+                    'SB': coerce_int(s.get('stolenBases'), 0),
+                    'AVG': coerce_float(s.get('avg'), 0.0),
+                    'OBP': coerce_float(s.get('obp'), 0.0),
+                    'SLG': coerce_float(s.get('slg'), 0.0),
+                    'OPS': coerce_float(s.get('ops'), 0.0),
+                    'BB%': round(bb / pa * 100, 1),
+                    'K%': round(so / pa * 100, 1),
+                })
+        return pd.DataFrame(rows), None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+def get_league_team_pitching_mlb(season: int) -> tuple[pd.DataFrame, str | None]:
+    """All-team season pitching stats from the MLB Stats API."""
+    client = MLBClient()
+    try:
+        data = client._get('/teams/stats', {
+            'sportId': 1, 'stats': 'season', 'group': 'pitching', 'season': season,
+        })
+        rows: list[dict[str, Any]] = []
+        for stat_block in data.get('stats', []):
+            for split in stat_block.get('splits', []):
+                team = split.get('team', {})
+                s = split.get('stat', {})
+                rows.append({
+                    'Team': clean_text(team.get('name')),
+                    'ERA': coerce_float(s.get('era'), 0.0),
+                    'WHIP': coerce_float(s.get('whip'), 0.0),
+                    'IP': coerce_float(s.get('inningsPitched'), 0.0),
+                    'SO': coerce_int(s.get('strikeOuts'), 0),
+                    'BB': coerce_int(s.get('baseOnBalls'), 0),
+                    'HR': coerce_int(s.get('homeRuns'), 0),
+                    'H': coerce_int(s.get('hits'), 0),
+                    'ER': coerce_int(s.get('earnedRuns'), 0),
+                    'TBF': coerce_int(s.get('battersFaced'), 0),
+                    'Opp AVG': coerce_float(s.get('avg'), 0.0),
+                    'SV': coerce_int(s.get('saves'), 0),
+                    'HLD': coerce_int(s.get('holds'), 0),
+                    'BS': coerce_int(s.get('blownSaves'), 0),
+                    'GS': coerce_int(s.get('gamesStarted'), 0),
+                    'HBP': coerce_int(s.get('hitByPitch'), 0),
+                })
+        return pd.DataFrame(rows), None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+def get_league_team_fielding_mlb(season: int) -> tuple[pd.DataFrame, str | None]:
+    """All-team season fielding stats from the MLB Stats API."""
+    client = MLBClient()
+    try:
+        data = client._get('/teams/stats', {
+            'sportId': 1, 'stats': 'season', 'group': 'fielding', 'season': season,
+        })
+        rows: list[dict[str, Any]] = []
+        for stat_block in data.get('stats', []):
+            for split in stat_block.get('splits', []):
+                team = split.get('team', {})
+                s = split.get('stat', {})
+                rows.append({
+                    'Team': clean_text(team.get('name')),
+                    'E': coerce_int(s.get('errors'), 0),
+                    'Fielding %': coerce_float(s.get('fielding'), 0.0),
+                    'DP': coerce_int(s.get('doublePlays'), 0),
+                    'A': coerce_int(s.get('assists'), 0),
+                    'PO': coerce_int(s.get('putOuts'), 0),
+                    'TC': coerce_int(s.get('chances'), 0),
+                })
+        return pd.DataFrame(rows), None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+# ---------------------------------------------------------------------------
+# FanGraphs helpers (via pybaseball)
+# ---------------------------------------------------------------------------
+
+_FG_IMPORT_ERR = 'pybaseball is not installed; FanGraphs data unavailable.'
+
+
+def _parse_fg_pct(val: Any) -> float:
+    """Parse a FanGraphs percentage value (float or ``'8.5 %'`` string)."""
+    if isinstance(val, (int, float)):
+        return 0.0 if pd.isna(val) else round(float(val), 1)
+    s = str(val).strip().rstrip('%').strip()
+    try:
+        return round(float(s), 1)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def get_fg_team_batting(season: int) -> tuple[pd.DataFrame, str | None]:
+    """FanGraphs team batting (wOBA, wRC+, BB%, K%, etc.)."""
+    try:
+        from pybaseball import team_batting
+        df = team_batting(season)
+        if df is None or df.empty:
+            return pd.DataFrame(), 'FanGraphs returned no team batting data.'
+        return df, None
+    except ImportError:
+        return pd.DataFrame(), _FG_IMPORT_ERR
+    except Exception as exc:
+        return pd.DataFrame(), f'FanGraphs team batting unavailable: {exc}'
+
+
+def get_fg_team_pitching(season: int) -> tuple[pd.DataFrame, str | None]:
+    """FanGraphs team pitching (FIP, K-BB%, etc.)."""
+    try:
+        from pybaseball import team_pitching
+        df = team_pitching(season)
+        if df is None or df.empty:
+            return pd.DataFrame(), 'FanGraphs returned no team pitching data.'
+        return df, None
+    except ImportError:
+        return pd.DataFrame(), _FG_IMPORT_ERR
+    except Exception as exc:
+        return pd.DataFrame(), f'FanGraphs team pitching unavailable: {exc}'
+
+
+def get_fg_team_fielding(season: int) -> tuple[pd.DataFrame, str | None]:
+    """FanGraphs team fielding (DRS, UZR, Def if available)."""
+    try:
+        from pybaseball import team_fielding
+        df = team_fielding(season)
+        if df is None or df.empty:
+            return pd.DataFrame(), 'FanGraphs returned no team fielding data.'
+        return df, None
+    except ImportError:
+        return pd.DataFrame(), _FG_IMPORT_ERR
+    except Exception as exc:
+        return pd.DataFrame(), f'FanGraphs team fielding unavailable: {exc}'
+
+
+def get_fg_pitching_individual(season: int, qual: int = 0) -> tuple[pd.DataFrame, str | None]:
+    """Individual pitcher stats from FanGraphs for starter/reliever split."""
+    try:
+        from pybaseball import pitching_stats
+        df = pitching_stats(season, qual=qual)
+        if df is None or df.empty:
+            return pd.DataFrame(), 'FanGraphs returned no individual pitching data.'
+        return df, None
+    except ImportError:
+        return pd.DataFrame(), _FG_IMPORT_ERR
+    except Exception as exc:
+        return pd.DataFrame(), f'FanGraphs individual pitching unavailable: {exc}'
+
+
+def get_fg_batting_individual(season: int, qual: int = 0) -> tuple[pd.DataFrame, str | None]:
+    """Individual batter stats from FanGraphs for WAR leaderboard."""
+    try:
+        from pybaseball import batting_stats
+        df = batting_stats(season, qual=qual)
+        if df is None or df.empty:
+            return pd.DataFrame(), 'FanGraphs returned no individual batting data.'
+        return df, None
+    except ImportError:
+        return pd.DataFrame(), _FG_IMPORT_ERR
+    except Exception as exc:
+        return pd.DataFrame(), f'FanGraphs individual batting unavailable: {exc}'

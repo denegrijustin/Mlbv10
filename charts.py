@@ -187,3 +187,35 @@ def render_spray_chart(statcast_df: pd.DataFrame, chart_type: str = 'offensive')
     )
     
     st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+
+
+def render_ranking_bar(
+    df: pd.DataFrame,
+    value_col: str,
+    label_col: str = 'Team',
+    title: str = 'Leaderboard',
+    n: int = 10,
+    ascending: bool = False,
+) -> None:
+    """Horizontal bar chart showing a ranking metric for *n* teams."""
+    if df.empty or value_col not in df.columns or label_col not in df.columns:
+        st.info('No data available for chart.')
+        return
+    plot_df = df.sort_values(value_col, ascending=ascending).head(n).copy()
+    plot_df = plot_df.iloc[::-1]
+    fig = px.bar(
+        plot_df,
+        x=value_col,
+        y=label_col,
+        orientation='h',
+        title=title,
+        text=value_col,
+    )
+    fig.update_layout(
+        height=max(300, n * 35),
+        margin=dict(l=20, r=20, t=50, b=20),
+        yaxis_title='',
+        xaxis_title=value_col,
+    )
+    fig.update_traces(textposition='outside')
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
