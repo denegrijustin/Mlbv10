@@ -235,12 +235,27 @@ def _display_cols(df: pd.DataFrame) -> list[str]:
     return [c for c in df.columns if c != 'Source']
 
 
+# Metrics where lower values are better (ascending sort = best first).
+_LOWER_IS_BETTER = frozenset({
+    'ERA', 'WHIP', 'BB%', 'HR/9', 'FIP', 'Opp AVG', 'BS', 'E', 'K%',
+})
+
+
+def _sort_ascending(metric: str) -> bool:
+    """Return True if *metric* should sort ascending (lower is better)."""
+    return metric in _LOWER_IS_BETTER
+
+
+# Season selector goes back to 2020 (2019 data is sparse due to COVID).
+_MIN_RANKING_SEASON = 2020
+
+
 with rankings_tab:
     st.subheader('MLB Rankings')
     st.caption('League-wide team rankings across key offensive, defensive, and pitching categories.')
 
     ranking_season = st.selectbox(
-        'Season', options=list(range(date.today().year, 2019, -1)),
+        'Season', options=list(range(date.today().year, _MIN_RANKING_SEASON - 1, -1)),
         index=0, key='ranking_season',
     )
 
@@ -279,7 +294,7 @@ with rankings_tab:
                 'Sort by', [c for c in off_df.columns if c not in ('Rank', 'Team', 'Source')],
                 index=0, key='off_sort',
             )
-            asc_off = sort_off in ('K%',)  # lower K% is better
+            asc_off = _sort_ascending(sort_off)
             sorted_off = off_df.copy()
             sorted_off = sorted_off.sort_values(sort_off, ascending=asc_off).reset_index(drop=True)
             sorted_off['Rank'] = range(1, len(sorted_off) + 1)
@@ -310,7 +325,7 @@ with rankings_tab:
                 'Sort by', [c for c in def_df.columns if c not in ('Rank', 'Team', 'Source')],
                 index=0, key='def_sort',
             )
-            asc_def = sort_def in ('E',)  # lower errors is better
+            asc_def = _sort_ascending(sort_def)
             sorted_def = def_df.copy()
             sorted_def = sorted_def.sort_values(sort_def, ascending=asc_def).reset_index(drop=True)
             sorted_def['Rank'] = range(1, len(sorted_def) + 1)
@@ -340,7 +355,7 @@ with rankings_tab:
                 'Sort by', [c for c in sp_df.columns if c not in ('Rank', 'Team', 'Source')],
                 index=0, key='sp_sort',
             )
-            asc_sp = sort_sp in ('ERA', 'WHIP', 'BB%', 'HR/9', 'FIP', 'Opp AVG')
+            asc_sp = _sort_ascending(sort_sp)
             sorted_sp = sp_df.copy()
             sorted_sp = sorted_sp.sort_values(sort_sp, ascending=asc_sp).reset_index(drop=True)
             sorted_sp['Rank'] = range(1, len(sorted_sp) + 1)
@@ -370,7 +385,7 @@ with rankings_tab:
                 'Sort by', [c for c in rp_df.columns if c not in ('Rank', 'Team', 'Source')],
                 index=0, key='rp_sort',
             )
-            asc_rp = sort_rp in ('ERA', 'WHIP', 'BB%', 'HR/9', 'FIP', 'BS', 'Opp AVG')
+            asc_rp = _sort_ascending(sort_rp)
             sorted_rp = rp_df.copy()
             sorted_rp = sorted_rp.sort_values(sort_rp, ascending=asc_rp).reset_index(drop=True)
             sorted_rp['Rank'] = range(1, len(sorted_rp) + 1)

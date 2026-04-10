@@ -385,7 +385,11 @@ def build_statcast_summary_df(statcast_batter_df: pd.DataFrame, statcast_pitcher
 
 
 def _fg_col(df: pd.DataFrame, name: str, default: Any = 0) -> pd.Series:
-    """Safely access a DataFrame column, returning *default* if missing."""
+    """Safely access a DataFrame column, returning *default* if missing.
+
+    Named ``_fg_col`` because it is primarily used when reading FanGraphs /
+    MLB-API DataFrames, but it works with any DataFrame.
+    """
     if name in df.columns:
         return df[name].fillna(default)
     return pd.Series([default] * len(df), index=df.index)
@@ -532,7 +536,7 @@ def _classify_pitcher_role(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-_FIP_CONSTANT = 3.10  # league-average FIP constant (approx)
+_FIP_CONSTANT = 3.10  # Approximate league-average FIP constant; varies ~3.0-3.2 by year.
 
 
 def _agg_pitching_team(grp: pd.DataFrame, is_starter: bool) -> dict[str, Any]:
