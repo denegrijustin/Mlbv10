@@ -463,3 +463,25 @@ def get_fg_batting_individual(season: int, qual: int = 0) -> tuple[pd.DataFrame,
         return pd.DataFrame(), _FG_IMPORT_ERR
     except Exception as exc:
         return pd.DataFrame(), f'FanGraphs individual batting unavailable: {exc}'
+
+
+# ---------------------------------------------------------------------------
+# Division standings
+# ---------------------------------------------------------------------------
+
+def get_division_standings(season: int) -> tuple[dict, str | None]:
+    """Fetch division standings from the MLB Stats API.
+
+    Returns the raw JSON response dict and an optional error string.
+    """
+    client = MLBClient()
+    try:
+        data = client.get_standings({
+            'leagueId': '103,104',
+            'standingsTypes': 'regularSeason',
+            'season': season,
+            'hydrate': 'team',
+        })
+        return data, None
+    except Exception as exc:
+        return {}, str(exc)

@@ -784,3 +784,103 @@ def top_n_summary(
     out = out.sort_values(sort_col, ascending=ascending).head(n).reset_index(drop=True)
     out.insert(0, 'Rank', range(1, len(out) + 1))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Runs-by-inning builder
+# ---------------------------------------------------------------------------
+
+def build_runs_by_inning(
+    season_df: pd.DataFrame,
+    team_name: str,
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Build season total runs scored and allowed per inning from game log.
+
+    Returns two dicts: runs_for_by_inning, runs_against_by_inning.
+    Keys are inning numbers as strings ('1', '2', ...).
+    """
+    from mlb_api import MLBClient
+
+    games = _team_games(season_df, team_name)
+    if games.empty:
+        return {}, {}
+
+    finals = games[games['is_final']].copy()
+    if finals.empty:
+        return {}, {}
+
+    runs_for: dict[str, int] = {}
+    runs_against: dict[str, int] = {}
+    client = MLBClient()
+
+    # Process up to last 20 games to avoid excessive API calls
+    recent = finals.tail(20)
+    for _, row in recent.iterrows():
+        gpk = coerce_int(row.get('gamePk'), 0)
+        if gpk <= 0:
+            continue
+        try:
+            data = client.get_live_feed(gpk)
+        except Exception:
+            continue
+        linescore = (data.get('liveData') or {}).get('linescore') or {}
+        innings = linescore.get('innings') or []
+        is_home = row.get('location', '') == 'Home'
+        for inn in innings:
+            num = str(inn.get('num', ''))
+            if not num:
+                continue
+            h_runs = coerce_int((inn.get('home') or {}).get('runs'), 0)
+            a_runs = coerce_int((inn.get('away') or {}).get('runs'), 0)
+            if is_home:
+                runs_for[num] = runs_for.get(num, 0) + h_runs
+                runs_against[num] = runs_against.get(num, 0) + a_runs
+            else:
+                runs_for[num] = runs_for.get(num, 0) + a_runs
+                runs_against[num] = runs_against.get(num, 0) + h_runs
+
+    return runs_for, runs_against
+
+
+def build_standings_table(standings_data: dict, league_filter: str = 'all') -> pd.DataFrame:
+    """Build a standings DataFrame from MLB API standings response.
+
+    Parameters
+    ----------
+    standings_data : raw MLB API ``/standings`` JSON response.
+    league_filter : ``'AL'``, ``'NL'``, or ``'all'``.
+    """
+    rows: list[dict] = []
+    for rec in standings_data.get('records', []):
+        div_name = (rec.get('division') or {}).get('name', 'Unknown')
+        league_name = (rec.get('league') or {}).get('name', '')
+        for tr in rec.get('teamRecords', []):
+            team_info = tr.get('team', {})
+            split_recs = tr.get('records', {}).get('splitRecords', [])
+            l10 = '-'
+            for sr in split_recs:
+                if sr.get('type') == 'lastTen':
+                    l10 = f"{sr.get('wins', 0)}-{sr.get('losses', 0)}"
+                    break
+            rows.append({
+                'Division': div_name,
+                'League': league_name,
+                'Team': team_info.get('name', '-'),
+                'W': coerce_int(tr.get('wins'), 0),
+                'L': coerce_int(tr.get('losses'), 0),
+                'Pct': coerce_float(tr.get('winningPercentage'), 0.0),
+                'GB': str(tr.get('gamesBack', '-')),
+                'L10': l10,
+                'Strk': str(tr.get('streak', {}).get('streakCode', '-')),
+                'RS': coerce_int(tr.get('runsScored'), 0),
+                'RA': coerce_int(tr.get('runsAllowed'), 0),
+                'Diff': coerce_int(tr.get('runDifferential'), 0),
+            })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    if league_filter == 'AL':
+        df = df[df['League'].str.contains('American', case=False, na=False)]
+    elif league_filter == 'NL':
+        df = df[df['League'].str.contains('National', case=False, na=False)]
+    return df.reset_index(drop=True)
