@@ -377,3 +377,410 @@ def build_statcast_summary_df(statcast_batter_df: pd.DataFrame, statcast_pitcher
         {'Metric': 'Staff Whiff %', 'Value': round(pitch_whiff, 1), 'Trend': stoplight(pitch_whiff - 28, neutral_band=2)},
         {'Metric': 'Pitch Sample Size', 'Value': total_pitcher, 'Trend': '🟡 Context'},
     ])
+
+
+# ---------------------------------------------------------------------------
+# League-wide ranking builders
+# ---------------------------------------------------------------------------
+
+
+def _fg_col(df: pd.DataFrame, name: str, default: Any = 0) -> pd.Series:
+    """Safely access a DataFrame column, returning *default* if missing.
+
+    Named ``_fg_col`` because it is primarily used when reading FanGraphs /
+    MLB-API DataFrames, but it works with any DataFrame.
+    """
+    if name in df.columns:
+        return df[name].fillna(default)
+    return pd.Series([default] * len(df), index=df.index)
+
+
+def _fg_pct_series(df: pd.DataFrame, name: str) -> pd.Series:
+    """Parse a FanGraphs percentage column to a float Series."""
+    if name not in df.columns:
+        return pd.Series([0.0] * len(df), index=df.index)
+    return df[name].apply(_parse_fg_pct_val)
+
+
+def _parse_fg_pct_val(val: Any) -> float:
+    if isinstance(val, (int, float)):
+        return 0.0 if pd.isna(val) else round(float(val), 1)
+    s = str(val).strip().rstrip('%').strip()
+    try:
+        return round(float(s), 1)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _safe_sum(grp: pd.DataFrame, col: str) -> float:
+    """Sum a column in a group, returning 0.0 if the column is missing."""
+    if col in grp.columns:
+        return float(grp[col].fillna(0).sum())
+    return 0.0
+
+
+# ---- Offense -----------------------------------------------------------------
+
+def build_offensive_rankings(
+    fg_batting: pd.DataFrame,
+    mlb_hitting: pd.DataFrame,
+) -> pd.DataFrame:
+    """League-wide team offensive rankings.
+
+    Sources
+    -------
+    Primary : FanGraphs team batting (wOBA, wRC+, BB%, K%, etc.)
+    Fallback: MLB Stats API team hitting (standard metrics only).
+    """
+    if not fg_batting.empty and 'Team' in fg_batting.columns:
+        df = fg_batting.copy()
+        out = pd.DataFrame()
+        out['Team'] = _fg_col(df, 'Team', '-').astype(str)
+        g = _fg_col(df, 'G', 1).replace(0, 1)
+        r = _fg_col(df, 'R', 0)
+        out['R'] = r.astype(int)
+        out['R/G'] = (r / g).round(2)
+        out['AVG'] = _fg_col(df, 'AVG', 0.0).round(3)
+        out['OBP'] = _fg_col(df, 'OBP', 0.0).round(3)
+        out['SLG'] = _fg_col(df, 'SLG', 0.0).round(3)
+        out['OPS'] = _fg_col(df, 'OPS', 0.0).round(3)
+        out['HR'] = _fg_col(df, 'HR', 0).astype(int)
+        out['SB'] = _fg_col(df, 'SB', 0).astype(int)
+        out['BB%'] = _fg_pct_series(df, 'BB%')
+        out['K%'] = _fg_pct_series(df, 'K%')
+        for adv in ['wOBA', 'wRC+']:
+            if adv in df.columns:
+                out[adv] = df[adv].fillna(0).round(3 if adv == 'wOBA' else 0)
+        out['Source'] = 'FanGraphs'
+    elif not mlb_hitting.empty and 'Team' in mlb_hitting.columns:
+        keep = [c for c in ['Team', 'R', 'R/G', 'HR', 'SB', 'AVG', 'OBP',
+                            'SLG', 'OPS', 'BB%', 'K%'] if c in mlb_hitting.columns]
+        out = mlb_hitting[keep].copy()
+        out['Source'] = 'MLB Stats API'
+    else:
+        return pd.DataFrame()
+
+    out = out.drop_duplicates(subset='Team', keep='first')
+    out = out.sort_values('OPS', ascending=False).reset_index(drop=True)
+    out.insert(0, 'Rank', range(1, len(out) + 1))
+    return out
+
+
+# ---- Defense -----------------------------------------------------------------
+
+def build_defensive_rankings(
+    mlb_fielding: pd.DataFrame,
+    fg_fielding: pd.DataFrame,
+) -> pd.DataFrame:
+    """League-wide team defensive rankings.
+
+    Sources
+    -------
+    Standard : MLB Stats API (E, Fielding %, DP).
+    Advanced : FanGraphs team fielding (DRS, UZR, Def).
+    """
+    if not mlb_fielding.empty and 'Team' in mlb_fielding.columns:
+        keep = [c for c in ['Team', 'E', 'Fielding %', 'DP', 'A', 'PO']
+                if c in mlb_fielding.columns]
+        out = mlb_fielding[keep].copy()
+
+        if not fg_fielding.empty and 'Team' in fg_fielding.columns:
+            fg = fg_fielding.copy()
+            adv = pd.DataFrame({'Team': _fg_col(fg, 'Team', '-').astype(str)})
+            has_adv = False
+            for col in ['DRS', 'UZR', 'Def']:
+                if col in fg.columns:
+                    adv[col] = fg[col].fillna(0).round(1 if col != 'DRS' else 0)
+                    has_adv = True
+            if has_adv:
+                out = out.merge(adv, on='Team', how='left')
+                for c in adv.columns:
+                    if c != 'Team' and c in out.columns:
+                        out[c] = out[c].fillna(0)
+                out['Source'] = 'MLB Stats API + FanGraphs'
+            else:
+                out['Source'] = 'MLB Stats API'
+        else:
+            out['Source'] = 'MLB Stats API'
+
+    elif not fg_fielding.empty and 'Team' in fg_fielding.columns:
+        df = fg_fielding.copy()
+        out = pd.DataFrame()
+        out['Team'] = _fg_col(df, 'Team', '-').astype(str)
+        out['E'] = _fg_col(df, 'E', 0).astype(int)
+        out['Fielding %'] = _fg_col(df, 'FP', 0.0).round(3)
+        out['DP'] = _fg_col(df, 'DP', 0).astype(int)
+        for adv in ['DRS', 'UZR', 'Def']:
+            if adv in df.columns:
+                out[adv] = df[adv].fillna(0).round(1 if adv != 'DRS' else 0)
+        out['Source'] = 'FanGraphs'
+    else:
+        return pd.DataFrame()
+
+    out = out.drop_duplicates(subset='Team', keep='first')
+    sort_col = 'Def' if 'Def' in out.columns else 'Fielding %'
+    out = out.sort_values(sort_col, ascending=False).reset_index(drop=True)
+    out.insert(0, 'Rank', range(1, len(out) + 1))
+    return out
+
+
+# ---- Pitching helpers --------------------------------------------------------
+
+def _classify_pitcher_role(df: pd.DataFrame) -> pd.DataFrame:
+    """Tag each pitcher row as ``'SP'`` or ``'RP'`` based on GS/G ratio."""
+    out = df.copy()
+    g = _fg_col(out, 'G', 0).astype(float).replace(0, 1)
+    gs = _fg_col(out, 'GS', 0).astype(float)
+    out['_role'] = 'RP'
+    out.loc[(gs >= 3) & (gs / g >= 0.5), '_role'] = 'SP'
+    return out
+
+
+_FIP_CONSTANT = 3.10  # Approximate league-average FIP constant; varies ~3.0-3.2 by year.
+
+
+def _agg_pitching_team(grp: pd.DataFrame, is_starter: bool) -> dict[str, Any]:
+    """Aggregate individual pitcher stats for one team."""
+    ip = _safe_sum(grp, 'IP')
+    er = _safe_sum(grp, 'ER')
+    h = _safe_sum(grp, 'H')
+    bb = _safe_sum(grp, 'BB')
+    so = _safe_sum(grp, 'SO')
+    hr = _safe_sum(grp, 'HR')
+    tbf = _safe_sum(grp, 'TBF')
+    hbp = _safe_sum(grp, 'HBP')
+    sv = _safe_sum(grp, 'SV')
+    hld = _safe_sum(grp, 'HLD')
+    bs = _safe_sum(grp, 'BS')
+    gs = _safe_sum(grp, 'GS')
+
+    ip_s = max(ip, 0.1)
+    tbf_s = max(tbf, 1)
+    ab_approx = max(tbf_s - bb - hbp, 1)
+
+    row: dict[str, Any] = {
+        'ERA': round(er / ip_s * 9, 2),
+        'WHIP': round((bb + h) / ip_s, 2),
+        'IP': round(ip, 1),
+        'K%': round(so / tbf_s * 100, 1),
+        'BB%': round(bb / tbf_s * 100, 1),
+        'K-BB%': round((so - bb) / tbf_s * 100, 1),
+        'HR/9': round(hr / ip_s * 9, 2),
+        'FIP': round(((13 * hr + 3 * (bb + hbp) - 2 * so) / ip_s) + _FIP_CONSTANT, 2),
+        'Opp AVG': round(h / ab_approx, 3),
+    }
+
+    if is_starter:
+        row['IP/GS'] = round(ip / max(gs, 1), 1)
+        if 'QS' in grp.columns:
+            row['QS'] = int(grp['QS'].fillna(0).sum())
+    else:
+        row['SV'] = int(sv)
+        row['HLD'] = int(hld)
+        row['BS'] = int(bs)
+        row['Save%'] = round(sv / max(sv + bs, 1) * 100, 1)
+
+    return row
+
+
+# ---- Starters ----------------------------------------------------------------
+
+def build_starter_rankings(
+    fg_pitch_ind: pd.DataFrame,
+    mlb_pitching: pd.DataFrame,
+) -> pd.DataFrame:
+    """Team-level starting-pitching rankings.
+
+    Sources
+    -------
+    Primary : FanGraphs individual pitching, classified by GS/G ratio.
+    Fallback: MLB Stats API team pitching (combined, not split by role).
+    """
+    if not fg_pitch_ind.empty and 'Team' in fg_pitch_ind.columns:
+        classified = _classify_pitcher_role(fg_pitch_ind)
+        starters = classified[classified['_role'] == 'SP'].copy()
+        if starters.empty:
+            return pd.DataFrame()
+
+        rows: list[dict[str, Any]] = []
+        for team, grp in starters.groupby('Team'):
+            row = _agg_pitching_team(grp, is_starter=True)
+            row['Team'] = team
+            rows.append(row)
+
+        out = pd.DataFrame(rows)
+        out['Source'] = 'FanGraphs (individual, SP classified)'
+        out = out.sort_values('ERA', ascending=True).reset_index(drop=True)
+        out.insert(0, 'Rank', range(1, len(out) + 1))
+        # Reorder so Team is right after Rank
+        cols = ['Rank', 'Team'] + [c for c in out.columns if c not in ('Rank', 'Team')]
+        return out[cols]
+
+    # Fallback: MLB Stats API (combined pitching, no role split)
+    if not mlb_pitching.empty and 'Team' in mlb_pitching.columns:
+        df = mlb_pitching.copy()
+        ip = _fg_col(df, 'IP', 0.1).replace(0, 0.1)
+        tbf = _fg_col(df, 'TBF', 1).replace(0, 1)
+        out = pd.DataFrame()
+        out['Team'] = _fg_col(df, 'Team', '-').astype(str)
+        out['ERA'] = _fg_col(df, 'ERA', 0.0)
+        out['WHIP'] = _fg_col(df, 'WHIP', 0.0)
+        out['IP'] = _fg_col(df, 'IP', 0.0)
+        out['K%'] = (_fg_col(df, 'SO', 0) / tbf * 100).round(1)
+        out['BB%'] = (_fg_col(df, 'BB', 0) / tbf * 100).round(1)
+        out['K-BB%'] = (out['K%'] - out['BB%']).round(1)
+        out['HR/9'] = (_fg_col(df, 'HR', 0) / ip * 9).round(2)
+        out['Opp AVG'] = _fg_col(df, 'Opp AVG', 0.0)
+        out['Source'] = 'MLB Stats API (combined, not split by role)'
+        out = out.sort_values('ERA', ascending=True).reset_index(drop=True)
+        out.insert(0, 'Rank', range(1, len(out) + 1))
+        return out
+
+    return pd.DataFrame()
+
+
+# ---- Relievers ---------------------------------------------------------------
+
+def build_reliever_rankings(
+    fg_pitch_ind: pd.DataFrame,
+    mlb_pitching: pd.DataFrame,
+) -> pd.DataFrame:
+    """Team-level relief-pitching rankings.
+
+    Sources
+    -------
+    Primary : FanGraphs individual pitching, classified by GS/G ratio.
+    Fallback: MLB Stats API team pitching (combined, not split by role).
+    """
+    if not fg_pitch_ind.empty and 'Team' in fg_pitch_ind.columns:
+        classified = _classify_pitcher_role(fg_pitch_ind)
+        relievers = classified[classified['_role'] == 'RP'].copy()
+        if relievers.empty:
+            return pd.DataFrame()
+
+        rows: list[dict[str, Any]] = []
+        for team, grp in relievers.groupby('Team'):
+            row = _agg_pitching_team(grp, is_starter=False)
+            row['Team'] = team
+            rows.append(row)
+
+        out = pd.DataFrame(rows)
+        out['Source'] = 'FanGraphs (individual, RP classified)'
+        out = out.sort_values('ERA', ascending=True).reset_index(drop=True)
+        out.insert(0, 'Rank', range(1, len(out) + 1))
+        cols = ['Rank', 'Team'] + [c for c in out.columns if c not in ('Rank', 'Team')]
+        return out[cols]
+
+    # Fallback: MLB Stats API combined
+    if not mlb_pitching.empty and 'Team' in mlb_pitching.columns:
+        df = mlb_pitching.copy()
+        out = pd.DataFrame()
+        out['Team'] = _fg_col(df, 'Team', '-').astype(str)
+        out['ERA'] = _fg_col(df, 'ERA', 0.0)
+        out['WHIP'] = _fg_col(df, 'WHIP', 0.0)
+        out['SV'] = _fg_col(df, 'SV', 0).astype(int)
+        out['HLD'] = _fg_col(df, 'HLD', 0).astype(int)
+        out['BS'] = _fg_col(df, 'BS', 0).astype(int)
+        sv = out['SV'].astype(float)
+        bs = out['BS'].astype(float)
+        out['Save%'] = (sv / (sv + bs).replace(0, 1) * 100).round(1)
+        out['Source'] = 'MLB Stats API (combined, not split by role)'
+        out = out.sort_values('ERA', ascending=True).reset_index(drop=True)
+        out.insert(0, 'Rank', range(1, len(out) + 1))
+        return out
+
+    return pd.DataFrame()
+
+
+# ---- WAR Leaderboard ---------------------------------------------------------
+
+def build_war_leaderboard(
+    fg_bat_ind: pd.DataFrame,
+    fg_pitch_ind: pd.DataFrame,
+    filter_type: str = 'all',
+) -> pd.DataFrame:
+    """MLB-wide WAR leaderboard.
+
+    Parameters
+    ----------
+    filter_type : ``'all'``, ``'hitters'``, or ``'pitchers'``.
+
+    Sources
+    -------
+    FanGraphs individual batting + pitching stats.
+    """
+    parts: list[pd.DataFrame] = []
+
+    if not fg_bat_ind.empty and 'WAR' in fg_bat_ind.columns and filter_type in ('all', 'hitters'):
+        bat = fg_bat_ind.copy()
+        bdf = pd.DataFrame()
+        bdf['Player'] = _fg_col(bat, 'Name', '-').astype(str)
+        bdf['Team'] = _fg_col(bat, 'Team', '-').astype(str)
+        bdf['WAR'] = _fg_col(bat, 'WAR', 0.0).round(1)
+        bdf['Type'] = 'Hitter'
+        if 'Pos' in bat.columns:
+            bdf['Pos'] = bat['Pos'].fillna('-').astype(str)
+        elif 'POS' in bat.columns:
+            bdf['Pos'] = bat['POS'].fillna('-').astype(str)
+        else:
+            bdf['Pos'] = '-'
+        bdf['bWAR'] = bdf['WAR']
+        bdf['pWAR'] = 0.0
+        parts.append(bdf)
+
+    if not fg_pitch_ind.empty and 'WAR' in fg_pitch_ind.columns and filter_type in ('all', 'pitchers'):
+        pit = fg_pitch_ind.copy()
+        pdf = pd.DataFrame()
+        pdf['Player'] = _fg_col(pit, 'Name', '-').astype(str)
+        pdf['Team'] = _fg_col(pit, 'Team', '-').astype(str)
+        pdf['WAR'] = _fg_col(pit, 'WAR', 0.0).round(1)
+        pdf['Type'] = 'Pitcher'
+        pdf['Pos'] = 'P'
+        pdf['bWAR'] = 0.0
+        pdf['pWAR'] = pdf['WAR']
+        parts.append(pdf)
+
+    if not parts:
+        return pd.DataFrame()
+
+    combined = pd.concat(parts, ignore_index=True)
+
+    if filter_type == 'all':
+        # For two-way players, aggregate WAR by name+team
+        agg = combined.groupby(['Player', 'Team'], as_index=False).agg({
+            'WAR': 'sum',
+            'bWAR': 'sum',
+            'pWAR': 'sum',
+            'Type': lambda x: '/'.join(sorted(set(x))),
+            'Pos': 'first',
+        })
+        combined = agg
+
+    combined = combined.sort_values('WAR', ascending=False).reset_index(drop=True)
+    combined.insert(0, 'Rank', range(1, len(combined) + 1))
+    cols = ['Rank', 'Player', 'Team', 'Pos', 'Type', 'WAR', 'bWAR', 'pWAR']
+    cols = [c for c in cols if c in combined.columns]
+    combined['Source'] = 'FanGraphs'
+    return combined[cols + ['Source']]
+
+
+# ---- Summary helpers for leader cards ----------------------------------------
+
+def top_n_summary(
+    df: pd.DataFrame,
+    sort_col: str,
+    n: int = 5,
+    ascending: bool = True,
+    label_col: str = 'Team',
+) -> pd.DataFrame:
+    """Return the top *n* rows from *df* sorted by *sort_col*.
+
+    Useful for quick "Top 5" / "Bottom 5" summary cards.
+    """
+    if df.empty or sort_col not in df.columns:
+        return pd.DataFrame()
+    keep = [c for c in [label_col, sort_col] if c in df.columns]
+    out = df[keep].copy()
+    out = out.sort_values(sort_col, ascending=ascending).head(n).reset_index(drop=True)
+    out.insert(0, 'Rank', range(1, len(out) + 1))
+    return out

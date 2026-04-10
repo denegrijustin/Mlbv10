@@ -5,6 +5,25 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
+from mlb_api import (
+    get_league_team_hitting_mlb,
+    get_league_team_pitching_mlb,
+    get_league_team_fielding_mlb,
+    get_fg_team_batting,
+    get_fg_team_fielding,
+    get_fg_pitching_individual,
+    get_fg_batting_individual,
+)
+from data_helpers import (
+    build_offensive_rankings,
+    build_defensive_rankings,
+    build_starter_rankings,
+    build_reliever_rankings,
+    build_war_leaderboard,
+    top_n_summary,
+)
+from charts import render_ranking_bar
+
 st.set_page_config(page_title='Live MLB Analytics Dashboard', layout='wide')
 
 st.title('Live MLB Analytics Dashboard')
@@ -77,8 +96,8 @@ cols[3].metric('Runs', '245', '+8')
 cols[4].metric('Wildcard Rank', '#5')
 
 # Create tabs
-summary_tab, schedule_tab, trends_tab, deep_tab, spray_tab, live_tab = st.tabs([
-    'Summary', 'Schedule', 'Trends', 'Deep Trends', 'Spray Charts', 'Live Feed'
+summary_tab, schedule_tab, trends_tab, deep_tab, spray_tab, live_tab, rankings_tab = st.tabs([
+    'Summary', 'Schedule', 'Trends', 'Deep Trends', 'Spray Charts', 'Live Feed', 'MLB Rankings'
 ])
 
 with summary_tab:
@@ -155,5 +174,278 @@ with live_tab:
     else:
         st.info('No active in-progress live game feed is available.')
 
+# ---------------------------------------------------------------------------
+# MLB Rankings tab
+# ---------------------------------------------------------------------------
+
+# Cached data loaders – each source is fetched once per hour max.
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_fg_team_batting(season: int):
+    return get_fg_team_batting(season)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_mlb_team_hitting(season: int):
+    return get_league_team_hitting_mlb(season)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_mlb_team_fielding(season: int):
+    return get_league_team_fielding_mlb(season)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_fg_team_fielding(season: int):
+    return get_fg_team_fielding(season)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_mlb_team_pitching(season: int):
+    return get_league_team_pitching_mlb(season)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_fg_pitching_individual(season: int):
+    return get_fg_pitching_individual(season)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_fg_batting_individual(season: int):
+    return get_fg_batting_individual(season)
+
+
+def _render_leader_cards(df: pd.DataFrame, metric: str, label: str = 'Team',
+                         top_title: str = 'Top 5', bot_title: str = 'Bottom 5',
+                         ascending_best: bool = True) -> None:
+    """Show compact Top-5 / Bottom-5 summary cards side-by-side."""
+    left, right = st.columns(2)
+    with left:
+        st.markdown(f'**{top_title}**')
+        top5 = top_n_summary(df, metric, n=5, ascending=ascending_best, label_col=label)
+        if not top5.empty:
+            st.dataframe(top5, use_container_width=True, hide_index=True)
+        else:
+            st.caption('No data')
+    with right:
+        st.markdown(f'**{bot_title}**')
+        bot5 = top_n_summary(df, metric, n=5, ascending=not ascending_best, label_col=label)
+        if not bot5.empty:
+            st.dataframe(bot5, use_container_width=True, hide_index=True)
+        else:
+            st.caption('No data')
+
+
+def _display_cols(df: pd.DataFrame) -> list[str]:
+    """Return display columns, dropping the internal Source column."""
+    return [c for c in df.columns if c != 'Source']
+
+
+# Metrics where lower values are better (ascending sort = best first).
+_LOWER_IS_BETTER = frozenset({
+    'ERA', 'WHIP', 'BB%', 'HR/9', 'FIP', 'Opp AVG', 'BS', 'E', 'K%',
+})
+
+
+def _sort_ascending(metric: str) -> bool:
+    """Return True if *metric* should sort ascending (lower is better)."""
+    return metric in _LOWER_IS_BETTER
+
+
+# Season selector goes back to 2020 (2019 data is sparse due to COVID).
+_MIN_RANKING_SEASON = 2020
+
+
+with rankings_tab:
+    st.subheader('MLB Rankings')
+    st.caption('League-wide team rankings across key offensive, defensive, and pitching categories.')
+
+    ranking_season = st.selectbox(
+        'Season', options=list(range(date.today().year, _MIN_RANKING_SEASON - 1, -1)),
+        index=0, key='ranking_season',
+    )
+
+    off_sub, def_sub, sp_sub, rp_sub, war_sub = st.tabs([
+        '⚾ Offense', '🛡️ Defense', '🎯 Starting Pitching',
+        '💪 Relief Pitching', '🏆 WAR Leaders',
+    ])
+
+    # -- shared data loads (cached) --
+    with st.spinner('Loading rankings data…'):
+        fg_bat, fg_bat_err = _load_fg_team_batting(ranking_season)
+        mlb_hit, mlb_hit_err = _load_mlb_team_hitting(ranking_season)
+        mlb_field, mlb_field_err = _load_mlb_team_fielding(ranking_season)
+        fg_field, fg_field_err = _load_fg_team_fielding(ranking_season)
+        fg_pitch_ind, fg_pitch_ind_err = _load_fg_pitching_individual(ranking_season)
+        mlb_pitch, mlb_pitch_err = _load_mlb_team_pitching(ranking_season)
+        fg_bat_ind, fg_bat_ind_err = _load_fg_batting_individual(ranking_season)
+
+    # ---- Offense subtab ---------------------------------------------------
+    with off_sub:
+        st.markdown('#### Team Offensive Rankings')
+        off_df = build_offensive_rankings(fg_bat, mlb_hit)
+        if off_df.empty:
+            st.warning('Offensive rankings data is currently unavailable.')
+            if fg_bat_err:
+                st.caption(f'FanGraphs: {fg_bat_err}')
+            if mlb_hit_err:
+                st.caption(f'MLB API: {mlb_hit_err}')
+        else:
+            src = off_df['Source'].iloc[0] if 'Source' in off_df.columns else 'Unknown'
+            st.caption(f'Source: {src}')
+            _render_leader_cards(off_df, 'OPS', top_title='Top 5 Offenses (OPS)',
+                                 bot_title='Bottom 5 Offenses (OPS)', ascending_best=False)
+            st.markdown('---')
+            sort_off = st.selectbox(
+                'Sort by', [c for c in off_df.columns if c not in ('Rank', 'Team', 'Source')],
+                index=0, key='off_sort',
+            )
+            asc_off = _sort_ascending(sort_off)
+            sorted_off = off_df.copy()
+            sorted_off = sorted_off.sort_values(sort_off, ascending=asc_off).reset_index(drop=True)
+            sorted_off['Rank'] = range(1, len(sorted_off) + 1)
+            st.dataframe(sorted_off[_display_cols(sorted_off)], use_container_width=True, hide_index=True)
+            render_ranking_bar(off_df, sort_off, title=f'Top 10 – {sort_off}',
+                               ascending=not asc_off)
+
+    # ---- Defense subtab ---------------------------------------------------
+    with def_sub:
+        st.markdown('#### Team Defensive Rankings')
+        def_df = build_defensive_rankings(mlb_field, fg_field)
+        if def_df.empty:
+            st.warning('Defensive rankings data is currently unavailable.')
+            if mlb_field_err:
+                st.caption(f'MLB API: {mlb_field_err}')
+            if fg_field_err:
+                st.caption(f'FanGraphs: {fg_field_err}')
+        else:
+            src = def_df['Source'].iloc[0] if 'Source' in def_df.columns else 'Unknown'
+            st.caption(f'Source: {src}')
+            best_sort = 'Def' if 'Def' in def_df.columns else 'Fielding %'
+            _render_leader_cards(def_df, best_sort,
+                                 top_title='Best Defensive Teams',
+                                 bot_title='Worst Defensive Teams',
+                                 ascending_best=False)
+            st.markdown('---')
+            sort_def = st.selectbox(
+                'Sort by', [c for c in def_df.columns if c not in ('Rank', 'Team', 'Source')],
+                index=0, key='def_sort',
+            )
+            asc_def = _sort_ascending(sort_def)
+            sorted_def = def_df.copy()
+            sorted_def = sorted_def.sort_values(sort_def, ascending=asc_def).reset_index(drop=True)
+            sorted_def['Rank'] = range(1, len(sorted_def) + 1)
+            st.dataframe(sorted_def[_display_cols(sorted_def)], use_container_width=True, hide_index=True)
+            render_ranking_bar(def_df, sort_def, title=f'Top 10 – {sort_def}',
+                               ascending=not asc_def)
+
+    # ---- Starting Pitching subtab -----------------------------------------
+    with sp_sub:
+        st.markdown('#### Team Starting Pitching Rankings')
+        sp_df = build_starter_rankings(fg_pitch_ind, mlb_pitch)
+        if sp_df.empty:
+            st.warning('Starting pitching rankings data is currently unavailable.')
+            if fg_pitch_ind_err:
+                st.caption(f'FanGraphs: {fg_pitch_ind_err}')
+            if mlb_pitch_err:
+                st.caption(f'MLB API: {mlb_pitch_err}')
+        else:
+            src = sp_df['Source'].iloc[0] if 'Source' in sp_df.columns else 'Unknown'
+            st.caption(f'Source: {src}')
+            _render_leader_cards(sp_df, 'ERA',
+                                 top_title='Best Starter Groups (ERA)',
+                                 bot_title='Worst Starter Groups (ERA)',
+                                 ascending_best=True)
+            st.markdown('---')
+            sort_sp = st.selectbox(
+                'Sort by', [c for c in sp_df.columns if c not in ('Rank', 'Team', 'Source')],
+                index=0, key='sp_sort',
+            )
+            asc_sp = _sort_ascending(sort_sp)
+            sorted_sp = sp_df.copy()
+            sorted_sp = sorted_sp.sort_values(sort_sp, ascending=asc_sp).reset_index(drop=True)
+            sorted_sp['Rank'] = range(1, len(sorted_sp) + 1)
+            st.dataframe(sorted_sp[_display_cols(sorted_sp)], use_container_width=True, hide_index=True)
+            render_ranking_bar(sp_df, sort_sp, title=f'Top 10 – {sort_sp}',
+                               ascending=not asc_sp)
+
+    # ---- Relief Pitching subtab -------------------------------------------
+    with rp_sub:
+        st.markdown('#### Team Relief Pitching Rankings')
+        rp_df = build_reliever_rankings(fg_pitch_ind, mlb_pitch)
+        if rp_df.empty:
+            st.warning('Relief pitching rankings data is currently unavailable.')
+            if fg_pitch_ind_err:
+                st.caption(f'FanGraphs: {fg_pitch_ind_err}')
+            if mlb_pitch_err:
+                st.caption(f'MLB API: {mlb_pitch_err}')
+        else:
+            src = rp_df['Source'].iloc[0] if 'Source' in rp_df.columns else 'Unknown'
+            st.caption(f'Source: {src}')
+            _render_leader_cards(rp_df, 'ERA',
+                                 top_title='Best Bullpens (ERA)',
+                                 bot_title='Worst Bullpens (ERA)',
+                                 ascending_best=True)
+            st.markdown('---')
+            sort_rp = st.selectbox(
+                'Sort by', [c for c in rp_df.columns if c not in ('Rank', 'Team', 'Source')],
+                index=0, key='rp_sort',
+            )
+            asc_rp = _sort_ascending(sort_rp)
+            sorted_rp = rp_df.copy()
+            sorted_rp = sorted_rp.sort_values(sort_rp, ascending=asc_rp).reset_index(drop=True)
+            sorted_rp['Rank'] = range(1, len(sorted_rp) + 1)
+            st.dataframe(sorted_rp[_display_cols(sorted_rp)], use_container_width=True, hide_index=True)
+            render_ranking_bar(rp_df, sort_rp, title=f'Top 10 – {sort_rp}',
+                               ascending=not asc_rp)
+
+    # ---- WAR Leaders subtab -----------------------------------------------
+    with war_sub:
+        st.markdown('#### WAR Leaders')
+        war_filter = st.radio(
+            'Filter', ['Overall', 'Hitters', 'Pitchers'],
+            horizontal=True, key='war_filter',
+        )
+        _filter_map = {'Overall': 'all', 'Hitters': 'hitters', 'Pitchers': 'pitchers'}
+        war_df = build_war_leaderboard(fg_bat_ind, fg_pitch_ind,
+                                       filter_type=_filter_map[war_filter])
+        if war_df.empty:
+            st.warning('WAR leaderboard data is currently unavailable.')
+            if fg_bat_ind_err:
+                st.caption(f'FanGraphs batting: {fg_bat_ind_err}')
+            if fg_pitch_ind_err:
+                st.caption(f'FanGraphs pitching: {fg_pitch_ind_err}')
+        else:
+            src = war_df['Source'].iloc[0] if 'Source' in war_df.columns else 'Unknown'
+            st.caption(f'Source: {src}')
+
+            # Summary strip
+            top_all = war_df.head(1)
+            if not top_all.empty:
+                strip_cols = st.columns(3)
+                row0 = top_all.iloc[0]
+                strip_cols[0].metric('Current WAR Leader',
+                                     f"{row0.get('Player', '-')} ({row0.get('Team', '-')})",
+                                     f"{row0.get('WAR', 0):.1f} WAR")
+
+                # Top hitter by WAR
+                hitter_war = build_war_leaderboard(fg_bat_ind, fg_pitch_ind, 'hitters')
+                if not hitter_war.empty:
+                    h0 = hitter_war.iloc[0]
+                    strip_cols[1].metric('Top Hitter WAR',
+                                         f"{h0.get('Player', '-')} ({h0.get('Team', '-')})",
+                                         f"{h0.get('WAR', 0):.1f} WAR")
+
+                # Top pitcher by WAR
+                pitcher_war = build_war_leaderboard(fg_bat_ind, fg_pitch_ind, 'pitchers')
+                if not pitcher_war.empty:
+                    p0 = pitcher_war.iloc[0]
+                    strip_cols[2].metric('Top Pitcher WAR',
+                                         f"{p0.get('Player', '-')} ({p0.get('Team', '-')})",
+                                         f"{p0.get('WAR', 0):.1f} WAR")
+
+            st.markdown('---')
+            n_show = st.slider('Show top N players', 10, 100, 25, 5, key='war_n')
+            display_war = war_df.head(n_show)
+            st.dataframe(display_war[_display_cols(display_war)],
+                         use_container_width=True, hide_index=True)
+            render_ranking_bar(display_war, 'WAR', label_col='Player',
+                               title=f'Top {min(10, n_show)} by WAR', n=min(10, n_show),
+                               ascending=False)
+
 st.divider()
-st.caption('Version v13: Performance optimized with lazy-loaded Statcast data, parallel API calls, increased cache TTL to 3600s, and improved initial load speed.')
+st.caption('Version v14: Added MLB Rankings tab with league-wide Offense, Defense, Starting Pitching, Relief Pitching, and WAR Leaders boards.')
