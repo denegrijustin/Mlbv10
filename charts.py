@@ -67,7 +67,8 @@ def render_statcast_scatter(batter_df: pd.DataFrame, *, key: str = 'statcast_sca
     if batter_df.empty:
         st.info('Exit velocity data is not available yet.')
         return
-    fig = px.scatter(batter_df, x='Avg EV', y='Hard Hit %', size='PA', color='Grade', hover_name='Batter', title='Batter Quality of Contact')
+    size_col = 'PA' if 'PA' in batter_df.columns else None
+    fig = px.scatter(batter_df, x='Avg EV', y='Hard Hit %', size=size_col, color='Grade', hover_name='Batter', title='Batter Quality of Contact')
     fig.update_layout(height=420, margin=dict(l=20, r=20, t=50, b=20))
     st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
@@ -138,7 +139,7 @@ def render_spray_chart(statcast_df: pd.DataFrame, chart_type: str = 'offensive',
         plot_bgcolor='rgba(34, 139, 34, 0.3)',
         paper_bgcolor='white',
         xaxis=dict(scaleanchor='y', scaleratio=1, showgrid=False, zeroline=False),
-        yaxis=dict(showgrid=False, zeroline=False),
+        yaxis=dict(scaleanchor='x', scaleratio=1, showgrid=False, zeroline=False),
         margin=dict(l=50, r=50, t=50, b=50),
     )
 

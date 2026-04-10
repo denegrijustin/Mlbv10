@@ -290,10 +290,7 @@ with live_tab:
             live_box = build_live_box_df(live_summary)
             st.dataframe(live_box, use_container_width=True, hide_index=True)
 
-            # Auto-refresh for live games
-            st.caption('Auto-refreshes every 30 seconds during live games.')
-            import time
-            time.sleep(0)  # placeholder for st.rerun scheduling
+            # Manual refresh for live games
             if st.button('Refresh Live Feed', key='live_refresh_btn'):
                 st.cache_data.clear()
                 st.rerun()

@@ -813,7 +813,7 @@ def build_runs_by_inning(
     runs_against: dict[str, int] = {}
     client = MLBClient()
 
-    # Process up to last 20 games to avoid excessive API calls
+    # Process up to the last 20 completed games for this team to limit API calls
     recent = finals.tail(20)
     for _, row in recent.iterrows():
         gpk = coerce_int(row.get('gamePk'), 0)
