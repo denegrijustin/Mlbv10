@@ -8,6 +8,11 @@ import pandas as pd
 
 from formatting import clean_text, coerce_float, coerce_int, format_record, safe_pct, signed, stoplight
 
+# Physics constants for apex estimation
+_MPH_TO_FPS = 1.467          # multiply mph by this to get ft/s
+_GRAVITY_FT_S2 = 32.174      # standard gravity in ft/s²
+_DRAG_FACTOR = 0.55           # empirical drag reduction (accounts for air resistance on HR trajectory)
+
 SWING_DESCRIPTIONS = {
     'swinging_strike', 'swinging_strike_blocked', 'foul', 'foul_tip', 'foul_bunt',
     'hit_into_play', 'hit_into_play_no_out', 'hit_into_play_score', 'missed_bunt',
@@ -557,13 +562,12 @@ def _estimate_apex_ft(exit_velo_mph: float, launch_angle_deg: float) -> float | 
     """
     Estimate apex height using simplified projectile physics.
     H = (v0 * sin(theta))^2 / (2 * g), with drag approximation factor.
+    Constants: _MPH_TO_FPS, _GRAVITY_FT_S2, _DRAG_FACTOR are module-level.
     """
     try:
-        v0_fps = exit_velo_mph * 1.467  # mph to ft/s
+        v0_fps = exit_velo_mph * _MPH_TO_FPS
         theta_rad = math.radians(launch_angle_deg)
-        g = 32.174  # ft/s²
-        drag_factor = 0.55  # empirical reduction for air resistance
-        apex_ft = ((v0_fps * math.sin(theta_rad)) ** 2) / (2 * g) * drag_factor
+        apex_ft = ((v0_fps * math.sin(theta_rad)) ** 2) / (2 * _GRAVITY_FT_S2) * _DRAG_FACTOR
         return round(apex_ft, 1) if apex_ft > 0 else None
     except Exception:
         return None

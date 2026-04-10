@@ -230,6 +230,23 @@ def build_season_linescore_df(team_id: int, season: int, end_date: str) -> tuple
         return pd.DataFrame(columns=['gamePk', 'date', 'inning', 'team_runs', 'opp_runs', 'location']), str(exc)
 
 
+def _extract_last10(team_record: dict[str, Any]) -> str:
+    """Safely extract the last 10 games W-L record from a team standings record."""
+    try:
+        split_records = (team_record.get('records') or {}).get('splitRecords') or []
+        # The last-10 entry is typically the entry with type='last' or the one labelled 'Last 10'
+        for entry in split_records:
+            if str(entry.get('type', '')).lower() in ('last', 'last10', 'last_ten'):
+                return f"{entry.get('wins', '-')}-{entry.get('losses', '-')}"
+        # Fallback: use first entry if present
+        if split_records:
+            first = split_records[0]
+            return f"{first.get('wins', '-')}-{first.get('losses', '-')}"
+    except Exception:
+        pass
+    return '-'
+
+
 def get_division_standings(season: int) -> tuple[pd.DataFrame, str | None]:
     """Get current division standings for all divisions."""
     client = MLBClient()
@@ -255,8 +272,7 @@ def get_division_standings(season: int) -> tuple[pd.DataFrame, str | None]:
                     'pct': clean_text(tr.get('winningPercentage'), '.000'),
                     'gb': clean_text(tr.get('gamesBack'), '-'),
                     'streak': clean_text((tr.get('streak') or {}).get('streakCode'), '-'),
-                    'last10': clean_text((tr.get('records') or {}).get('splitRecords', [{}])[0].get('wins', ''), '') +
-                              '-' + clean_text((tr.get('records') or {}).get('splitRecords', [{}])[0].get('losses', ''), ''),
+                    'last10': _extract_last10(tr),
                     'runs_scored': coerce_int((tr.get('runsScored')), 0),
                     'runs_allowed': coerce_int((tr.get('runsAllowed')), 0),
                     'div_rank': coerce_int(tr.get('divisionRank'), 0),

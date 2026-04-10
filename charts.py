@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
-def _cfg() -> dict:
+def _get_plotly_config() -> dict:
     return {
         'scrollZoom': False,
         'responsive': True,
@@ -37,17 +37,13 @@ def _add_field_outline(fig: go.Figure) -> None:
             showlegend=False,
         ))
 
-    # Outfield wall arc (~330 ft left/right, ~405 ft center)
+    # Outfield wall arc (~330 ft left/right, ~405 ft center) using smooth sine approximation
     angles = np.linspace(math.radians(20), math.radians(160), 60)
-    wall_r = np.array([
-        330 + (405 - 330) * math.sin(a - math.radians(20)) / math.sin(math.radians(70))
-        if math.radians(20) <= a <= math.radians(160) else 330
-        for a in angles
-    ])
-    # Smooth arc approximation using 330-405-330
+
     def _wall_r(a: float) -> float:
         frac = (a - math.radians(20)) / math.radians(140)
         return 330 + (405 - 330) * math.sin(frac * math.pi)
+
     ox = [_wall_r(a) * math.cos(a) for a in angles]
     oy = [_wall_r(a) * math.sin(a) for a in angles]
     fig.add_trace(go.Scatter(
@@ -117,7 +113,7 @@ def render_schedule_chart(schedule_df: pd.DataFrame, key: str = 'schedule_chart'
     df['matchup'] = df['away'] + ' at ' + df['home']
     fig = px.bar(df, x='matchup', y=['away_score', 'home_score'], barmode='group', title="Today's Score Snapshot")
     fig.update_layout(height=380, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 def render_recent_trend_chart(recent_games_df: pd.DataFrame, key: str = 'recent_trend') -> None:
@@ -127,7 +123,7 @@ def render_recent_trend_chart(recent_games_df: pd.DataFrame, key: str = 'recent_
     df = recent_games_df.copy()
     fig = px.line(df, x='Date', y=['Team Runs', 'Opp Runs'], markers=True, title='Recent Runs Trend')
     fig.update_layout(height=400, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 def render_run_diff_chart(recent_games_df: pd.DataFrame, key: str = 'run_diff') -> None:
@@ -135,7 +131,7 @@ def render_run_diff_chart(recent_games_df: pd.DataFrame, key: str = 'run_diff') 
         return
     fig = px.bar(recent_games_df, x='Date', y='Run Diff', color='Result', title='Recent Game Run Differential')
     fig.update_layout(height=360, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 def render_rolling_chart(rolling_df: pd.DataFrame, key: str = 'rolling') -> None:
@@ -144,7 +140,7 @@ def render_rolling_chart(rolling_df: pd.DataFrame, key: str = 'rolling') -> None
         return
     fig = px.line(rolling_df, x='Date', y=['Runs 3', 'Runs 5', 'Diff 3', 'Diff 5'], markers=True, title='Rolling Team Trend Lines')
     fig.update_layout(height=420, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 def render_pitch_mix_chart(pitch_mix_df: pd.DataFrame, key: str = 'pitch_mix') -> None:
@@ -153,7 +149,7 @@ def render_pitch_mix_chart(pitch_mix_df: pd.DataFrame, key: str = 'pitch_mix') -
         return
     fig = px.bar(pitch_mix_df, x='Pitch Type', y='Usage %', color='Success', title='Pitch Type Usage')
     fig.update_layout(height=380, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 def render_statcast_scatter(batter_df: pd.DataFrame, key: str = 'statcast_scatter') -> None:
@@ -162,7 +158,7 @@ def render_statcast_scatter(batter_df: pd.DataFrame, key: str = 'statcast_scatte
         return
     fig = px.scatter(batter_df, x='Avg EV', y='Hard Hit %', color='Grade', hover_name='Batter', title='Batter Quality of Contact')
     fig.update_layout(height=420, margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 # ─── Runs by inning ───────────────────────────────────────────────────────────
@@ -222,7 +218,7 @@ def render_runs_by_inning_bar(inning_df: pd.DataFrame, key: str = 'rbi_bar') -> 
         legend=dict(x=0.01, y=0.99),
         hovermode='x unified',
     )
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 def render_runs_by_inning_heatmap(inning_df: pd.DataFrame, key: str = 'rbi_heatmap') -> None:
@@ -247,7 +243,7 @@ def render_runs_by_inning_heatmap(inning_df: pd.DataFrame, key: str = 'rbi_heatm
         height=300,
         margin=dict(l=20, r=20, t=50, b=20),
     )
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 # ─── Team ranking summary ─────────────────────────────────────────────────────
@@ -307,7 +303,7 @@ def render_war_chart(war_df: pd.DataFrame, key: str = 'war_chart') -> None:
         yaxis_title='',
         xaxis_title='WAR',
     )
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 # ─── Spray chart ──────────────────────────────────────────────────────────────
@@ -368,7 +364,7 @@ def render_player_spray_chart(spray_df: pd.DataFrame, player_name: str, key: str
         ))
 
     fig.update_layout(**_field_layout(f'Spray Chart — {player_name}'))
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 # ─── Home run visualization ───────────────────────────────────────────────────
@@ -450,7 +446,7 @@ def render_team_hr_2d(hr_df: pd.DataFrame, key: str = 'hr_2d') -> None:
     layout = _field_layout('Team Home Runs — This Season')
     layout['title'] = f'Team Home Runs — This Season ({len(df)} HRs)'
     fig.update_layout(**layout)
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 def render_team_hr_3d(hr_df: pd.DataFrame, key: str = 'hr_3d') -> None:
@@ -504,7 +500,7 @@ def render_team_hr_3d(hr_df: pd.DataFrame, key: str = 'hr_3d') -> None:
         font=dict(color='white'),
         margin=dict(l=0, r=0, t=50, b=0),
     )
-    st.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key)
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key)
 
 
 def render_hr_distribution(hr_df: pd.DataFrame, key: str = 'hr_dist') -> None:
@@ -517,13 +513,13 @@ def render_hr_distribution(hr_df: pd.DataFrame, key: str = 'hr_dist') -> None:
         if not dist_data.empty:
             fig = px.histogram(dist_data, x=dist_data, nbins=20, title='HR Distance Distribution', labels={'x': 'Distance (ft)'})
             fig.update_layout(height=300, margin=dict(l=20, r=20, t=40, b=20), showlegend=False)
-            c1.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key + '_dist')
+            c1.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key + '_dist')
     if 'launch_angle' in hr_df.columns:
         la_data = hr_df['launch_angle'].dropna()
         if not la_data.empty:
             fig = px.histogram(la_data, x=la_data, nbins=15, title='HR Launch Angle Distribution', labels={'x': 'Launch Angle (°)'})
             fig.update_layout(height=300, margin=dict(l=20, r=20, t=40, b=20), showlegend=False)
-            c2.plotly_chart(fig, use_container_width=True, config=_cfg(), key=key + '_la')
+            c2.plotly_chart(fig, use_container_width=True, config=_get_plotly_config(), key=key + '_la')
 
 
 # ─── Rankings tables ──────────────────────────────────────────────────────────
