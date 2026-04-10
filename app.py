@@ -18,7 +18,7 @@ from data_helpers import (
     build_starter_rankings,
     build_reliever_rankings,
     build_war_leaderboard,
-    _sort_rankings,
+    sort_rankings,
 )
 from charts import render_rankings_bar
 
@@ -264,7 +264,7 @@ with rankings_tab:
                 }
                 off_sort_sel = st.selectbox('Sort by', list(OFFENSE_SORT_OPTS.keys()), index=0, key='off_sort')
                 off_sort_col, off_sort_asc = OFFENSE_SORT_OPTS[off_sort_sel]
-                off_display = _sort_rankings(off_df, off_sort_col, off_sort_asc)
+                off_display = sort_rankings(off_df, off_sort_col, off_sort_asc)
                 display_cols = [c for c in off_display.columns if c != 'team_id']
                 st.dataframe(off_display[display_cols], use_container_width=True, hide_index=True)
 
@@ -294,7 +294,7 @@ with rankings_tab:
                 }
                 def_sort_sel = st.selectbox('Sort by', list(DEFENSE_SORT_OPTS.keys()), index=0, key='def_sort')
                 def_sort_col, def_sort_asc = DEFENSE_SORT_OPTS[def_sort_sel]
-                def_display = _sort_rankings(def_df, def_sort_col, def_sort_asc)
+                def_display = sort_rankings(def_df, def_sort_col, def_sort_asc)
                 display_cols = [c for c in def_display.columns if c != 'team_id']
                 st.dataframe(def_display[display_cols], use_container_width=True, hide_index=True)
 
@@ -330,7 +330,7 @@ with rankings_tab:
                 }
                 sp_sort_sel = st.selectbox('Sort by', list(SP_SORT_OPTS.keys()), index=0, key='sp_sort')
                 sp_sort_col, sp_sort_asc = SP_SORT_OPTS[sp_sort_sel]
-                sp_display = _sort_rankings(sp_df, sp_sort_col, sp_sort_asc)
+                sp_display = sort_rankings(sp_df, sp_sort_col, sp_sort_asc)
                 display_cols = [c for c in sp_display.columns if c != 'team_id']
                 st.dataframe(sp_display[display_cols], use_container_width=True, hide_index=True)
 
@@ -366,7 +366,7 @@ with rankings_tab:
                 }
                 rp_sort_sel = st.selectbox('Sort by', list(RP_SORT_OPTS.keys()), index=0, key='rp_sort')
                 rp_sort_col, rp_sort_asc = RP_SORT_OPTS[rp_sort_sel]
-                rp_display = _sort_rankings(rp_df, rp_sort_col, rp_sort_asc)
+                rp_display = sort_rankings(rp_df, rp_sort_col, rp_sort_asc)
                 display_cols = [c for c in rp_display.columns if c != 'team_id']
                 st.dataframe(rp_display[display_cols], use_container_width=True, hide_index=True)
 

@@ -383,7 +383,7 @@ def build_statcast_summary_df(statcast_batter_df: pd.DataFrame, statcast_pitcher
 # League-wide ranking builders
 # ---------------------------------------------------------------------------
 
-def _sort_rankings(df: pd.DataFrame, sort_col: str, ascending: bool) -> pd.DataFrame:
+def sort_rankings(df: pd.DataFrame, sort_col: str, ascending: bool) -> pd.DataFrame:
     """Sort a rankings DataFrame and re-assign rank column."""
     if df.empty or sort_col not in df.columns:
         return df
@@ -568,7 +568,7 @@ def build_war_leaderboard(
 
         for _, row in bat_df.iterrows():
             war_val = coerce_float(row.get('WAR'), 0.0)
-            pa_val = coerce_int(row.get(pa_col) if pa_col else 0, 0)
+            pa_val = coerce_int(row.get(pa_col, 0) if pa_col else 0, 0)
             if pa_col and pa_val < min_pa:
                 continue
             batter_rows.append({
@@ -590,10 +590,10 @@ def build_war_leaderboard(
 
         for _, row in pit_df.iterrows():
             war_val = coerce_float(row.get('WAR'), 0.0)
-            ip_val = coerce_float(row.get(ip_col) if ip_col else 0.0, 0.0)
+            ip_val = coerce_float(row.get(ip_col, 0.0) if ip_col else 0.0, 0.0)
             if ip_col and ip_val < min_ip:
                 continue
-            gs_val = coerce_int(row.get(gs_col) if gs_col else 0, 0)
+            gs_val = coerce_int(row.get(gs_col, 0) if gs_col else 0, 0)
             role = 'SP' if gs_val >= 3 else 'RP'
             pitcher_rows.append({
                 'Name': coerce_text(row, name_col),

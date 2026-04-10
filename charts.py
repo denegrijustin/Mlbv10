@@ -232,7 +232,7 @@ def render_rankings_bar(
     fig.update_layout(
         height=max(300, n * 35),
         margin=dict(l=130, r=40, t=50, b=20),
-        yaxis={'categoryorder': 'total ascending' if not ascending else 'total descending'},
+        yaxis={'categoryorder': 'total ascending' if ascending else 'total descending'},
         showlegend=False,
     )
     fig.update_traces(texttemplate='%{text}', textposition='outside')
