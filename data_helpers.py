@@ -377,3 +377,266 @@ def build_statcast_summary_df(statcast_batter_df: pd.DataFrame, statcast_pitcher
         {'Metric': 'Staff Whiff %', 'Value': round(pitch_whiff, 1), 'Trend': stoplight(pitch_whiff - 28, neutral_band=2)},
         {'Metric': 'Pitch Sample Size', 'Value': total_pitcher, 'Trend': '🟡 Context'},
     ])
+
+
+# ---------------------------------------------------------------------------
+# League-wide ranking builders
+# ---------------------------------------------------------------------------
+
+def _sort_rankings(df: pd.DataFrame, sort_col: str, ascending: bool) -> pd.DataFrame:
+    """Sort a rankings DataFrame and re-assign rank column."""
+    if df.empty or sort_col not in df.columns:
+        return df
+    out = df.copy()
+    out = out.sort_values(sort_col, ascending=ascending).reset_index(drop=True)
+    out['Rank'] = range(1, len(out) + 1)
+    return out
+
+
+def build_offensive_rankings(hitting_df: pd.DataFrame) -> pd.DataFrame:
+    """Build MLB-wide team offensive rankings table from MLB Stats API hitting data."""
+    if hitting_df.empty:
+        return pd.DataFrame(columns=['Rank', 'Team', 'GP', 'R', 'R/G', 'AVG', 'OBP', 'SLG', 'OPS', 'HR', 'SB', 'BB%', 'K%'])
+
+    df = hitting_df.copy()
+    gp = df['gamesPlayed'].replace(0, 1)
+    pa = df['plateAppearances'].replace(0, 1)
+
+    out = pd.DataFrame({
+        'team_id': df['team_id'],
+        'Team': df['team_name'],
+        'GP': df['gamesPlayed'],
+        'R': df['runs'],
+        'R/G': (df['runs'] / gp).round(2),
+        'AVG': df['avg'].round(3),
+        'OBP': df['obp'].round(3),
+        'SLG': df['slg'].round(3),
+        'OPS': df['ops'].round(3),
+        'HR': df['homeRuns'],
+        'SB': df['stolenBases'],
+        'BB%': (df['baseOnBalls'] / pa * 100).round(1),
+        'K%': (df['strikeOuts'] / pa * 100).round(1),
+    })
+
+    # Default: sort by OPS descending (rank 1 = best offense)
+    out = out.sort_values('OPS', ascending=False).reset_index(drop=True)
+    out.insert(0, 'Rank', range(1, len(out) + 1))
+    return out
+
+
+def build_defensive_rankings(fielding_df: pd.DataFrame) -> pd.DataFrame:
+    """Build MLB-wide team defensive rankings table from MLB Stats API fielding data."""
+    if fielding_df.empty:
+        return pd.DataFrame(columns=['Rank', 'Team', 'GP', 'E', 'FLD%', 'DP', 'RF/G'])
+
+    df = fielding_df.copy()
+
+    out = pd.DataFrame({
+        'team_id': df['team_id'],
+        'Team': df['team_name'],
+        'GP': df['gamesPlayed'],
+        'E': df['errors'],
+        'FLD%': df['fieldingPercentage'].round(4),
+        'DP': df['doublePlays'],
+        'RF/G': df['rangeFactorPerGame'].round(2),
+    })
+
+    # Default: sort by FLD% descending (rank 1 = best fielding %)
+    out = out.sort_values('FLD%', ascending=False).reset_index(drop=True)
+    out.insert(0, 'Rank', range(1, len(out) + 1))
+    return out
+
+
+def _aggregate_pitchers_by_team(pitcher_df: pd.DataFrame, role: str) -> pd.DataFrame:
+    """Aggregate individual pitcher stats by team for a given role (SP or RP)."""
+    df = pitcher_df[pitcher_df['role'] == role].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    agg = df.groupby(['team_id', 'team_name'], as_index=False).agg(
+        games_played=('games_played', 'sum'),
+        games_started=('games_started', 'sum'),
+        innings_pitched=('innings_pitched', 'sum'),
+        strikeouts=('strikeouts', 'sum'),
+        walks=('walks', 'sum'),
+        hits_allowed=('hits_allowed', 'sum'),
+        earned_runs=('earned_runs', 'sum'),
+        home_runs=('home_runs', 'sum'),
+        quality_starts=('quality_starts', 'sum'),
+        saves=('saves', 'sum'),
+        holds=('holds', 'sum'),
+        blown_saves=('blown_saves', 'sum'),
+        save_opportunities=('save_opportunities', 'sum'),
+        batters_faced=('batters_faced', 'sum'),
+    )
+
+    ip = agg['innings_pitched'].replace(0, 0.001)
+    bf = agg['batters_faced'].replace(0, 1)
+
+    agg['ERA'] = (agg['earned_runs'] * 9 / ip).round(2)
+    agg['WHIP'] = ((agg['walks'] + agg['hits_allowed']) / ip).round(3)
+    agg['K%'] = (agg['strikeouts'] / bf * 100).round(1)
+    agg['BB%'] = (agg['walks'] / bf * 100).round(1)
+    agg['K-BB%'] = (agg['K%'] - agg['BB%']).round(1)
+    agg['HR/9'] = (agg['home_runs'] * 9 / ip).round(2)
+
+    if role == 'SP':
+        gs = agg['games_started'].replace(0, 1)
+        agg['IP/GS'] = (agg['innings_pitched'] / gs).round(1)
+
+    sv_opp = agg['save_opportunities'].replace(0, 1)
+    agg['SV%'] = (agg['saves'] / sv_opp * 100).round(1)
+
+    return agg
+
+
+def build_starter_rankings(pitcher_df: pd.DataFrame) -> pd.DataFrame:
+    """Build MLB-wide team starting pitcher rankings from individual stats."""
+    empty_cols = ['Rank', 'Team', 'ERA', 'WHIP', 'IP', 'IP/GS', 'K%', 'BB%', 'K-BB%', 'HR/9', 'QS']
+    if pitcher_df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    agg = _aggregate_pitchers_by_team(pitcher_df, 'SP')
+    if agg.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    out = pd.DataFrame({
+        'team_id': agg['team_id'],
+        'Team': agg['team_name'],
+        'ERA': agg['ERA'],
+        'WHIP': agg['WHIP'],
+        'IP': agg['innings_pitched'].round(1),
+        'IP/GS': agg.get('IP/GS', pd.Series(0.0, index=agg.index)),
+        'K%': agg['K%'],
+        'BB%': agg['BB%'],
+        'K-BB%': agg['K-BB%'],
+        'HR/9': agg['HR/9'],
+        'QS': agg['quality_starts'],
+    })
+
+    # Default: sort by ERA ascending (rank 1 = lowest ERA)
+    out = out.sort_values('ERA', ascending=True).reset_index(drop=True)
+    out.insert(0, 'Rank', range(1, len(out) + 1))
+    return out
+
+
+def build_reliever_rankings(pitcher_df: pd.DataFrame) -> pd.DataFrame:
+    """Build MLB-wide team bullpen/reliever rankings from individual stats."""
+    empty_cols = ['Rank', 'Team', 'ERA', 'WHIP', 'K%', 'BB%', 'K-BB%', 'SV', 'HLD', 'SV%', 'BS']
+    if pitcher_df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    agg = _aggregate_pitchers_by_team(pitcher_df, 'RP')
+    if agg.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    out = pd.DataFrame({
+        'team_id': agg['team_id'],
+        'Team': agg['team_name'],
+        'ERA': agg['ERA'],
+        'WHIP': agg['WHIP'],
+        'K%': agg['K%'],
+        'BB%': agg['BB%'],
+        'K-BB%': agg['K-BB%'],
+        'SV': agg['saves'],
+        'HLD': agg['holds'],
+        'SV%': agg['SV%'],
+        'BS': agg['blown_saves'],
+    })
+
+    # Default: sort by ERA ascending (rank 1 = lowest ERA)
+    out = out.sort_values('ERA', ascending=True).reset_index(drop=True)
+    out.insert(0, 'Rank', range(1, len(out) + 1))
+    return out
+
+
+def build_war_leaderboard(
+    bat_df: pd.DataFrame,
+    pit_df: pd.DataFrame,
+    min_pa: int = 10,
+    min_ip: float = 5.0,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build WAR leaderboards (overall, batters, pitchers) from FanGraphs data."""
+    batter_rows: list[dict] = []
+    pitcher_rows: list[dict] = []
+
+    if not bat_df.empty and 'WAR' in bat_df.columns:
+        name_col = next((c for c in ['Name', 'name', 'playerName'] if c in bat_df.columns), None)
+        team_col = next((c for c in ['Team', 'team', 'Team Name'] if c in bat_df.columns), None)
+        pos_col = next((c for c in ['Pos', 'pos', 'Position', 'position'] if c in bat_df.columns), None)
+        pa_col = next((c for c in ['PA', 'pa', 'plateAppearances'] if c in bat_df.columns), None)
+
+        for _, row in bat_df.iterrows():
+            war_val = coerce_float(row.get('WAR'), 0.0)
+            pa_val = coerce_int(row.get(pa_col) if pa_col else 0, 0)
+            if pa_col and pa_val < min_pa:
+                continue
+            batter_rows.append({
+                'Name': coerce_text(row, name_col),
+                'Team': coerce_text(row, team_col),
+                'Pos': coerce_text(row, pos_col) if pos_col else 'OF/IF',
+                'WAR': war_val,
+                'HR': coerce_int(row.get('HR'), 0),
+                'AVG': coerce_float(row.get('AVG'), 0.0),
+                'OPS': coerce_float(row.get('OPS'), 0.0),
+                'wRC+': coerce_int(row.get('wRC+'), 0) if 'wRC+' in bat_df.columns else 0,
+            })
+
+    if not pit_df.empty and 'WAR' in pit_df.columns:
+        name_col = next((c for c in ['Name', 'name', 'playerName'] if c in pit_df.columns), None)
+        team_col = next((c for c in ['Team', 'team', 'Team Name'] if c in pit_df.columns), None)
+        ip_col = next((c for c in ['IP', 'ip', 'inningsPitched'] if c in pit_df.columns), None)
+        gs_col = next((c for c in ['GS', 'gs', 'gamesStarted'] if c in pit_df.columns), None)
+
+        for _, row in pit_df.iterrows():
+            war_val = coerce_float(row.get('WAR'), 0.0)
+            ip_val = coerce_float(row.get(ip_col) if ip_col else 0.0, 0.0)
+            if ip_col and ip_val < min_ip:
+                continue
+            gs_val = coerce_int(row.get(gs_col) if gs_col else 0, 0)
+            role = 'SP' if gs_val >= 3 else 'RP'
+            pitcher_rows.append({
+                'Name': coerce_text(row, name_col),
+                'Team': coerce_text(row, team_col),
+                'Pos': role,
+                'WAR': war_val,
+                'ERA': coerce_float(row.get('ERA'), 0.0),
+                'IP': ip_val,
+                'WHIP': coerce_float(row.get('WHIP'), 0.0),
+                'FIP': coerce_float(row.get('FIP'), 0.0) if 'FIP' in pit_df.columns else 0.0,
+            })
+
+    def _make_df(rows: list[dict], extra_cols: list[str], base_cols: list[str]) -> pd.DataFrame:
+        if not rows:
+            return pd.DataFrame(columns=['Rank'] + base_cols + extra_cols)
+        df = pd.DataFrame(rows).sort_values('WAR', ascending=False).reset_index(drop=True)
+        df.insert(0, 'Rank', range(1, len(df) + 1))
+        return df
+
+    bat_war_df = _make_df(batter_rows, ['HR', 'AVG', 'OPS', 'wRC+'], ['Name', 'Team', 'Pos', 'WAR'])
+    pit_war_df = _make_df(pitcher_rows, ['ERA', 'IP', 'WHIP', 'FIP'], ['Name', 'Team', 'Pos', 'WAR'])
+
+    # Combined overall leaderboard
+    combined = []
+    for r in batter_rows:
+        combined.append({'Name': r['Name'], 'Team': r['Team'], 'Pos': r['Pos'], 'WAR': r['WAR']})
+    for r in pitcher_rows:
+        combined.append({'Name': r['Name'], 'Team': r['Team'], 'Pos': r['Pos'], 'WAR': r['WAR']})
+
+    if combined:
+        overall_df = pd.DataFrame(combined).sort_values('WAR', ascending=False).reset_index(drop=True)
+        overall_df.insert(0, 'Rank', range(1, len(overall_df) + 1))
+    else:
+        overall_df = pd.DataFrame(columns=['Rank', 'Name', 'Team', 'Pos', 'WAR'])
+
+    return overall_df, bat_war_df, pit_war_df
+
+
+def coerce_text(row: Any, col: str | None, default: str = '-') -> str:
+    """Safely extract a text value from a Series row."""
+    if col is None:
+        return default
+    val = row.get(col)
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return default
+    return str(val).strip() or default

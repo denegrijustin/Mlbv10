@@ -274,3 +274,198 @@ def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_
         return out, None
     except Exception as exc:
         return pd.DataFrame(), str(exc)
+
+
+# ---------------------------------------------------------------------------
+# League-wide ranking helpers
+# ---------------------------------------------------------------------------
+
+def get_league_hitting_stats(season: int) -> tuple[pd.DataFrame, str | None]:
+    """Fetch MLB-wide team hitting stats from the MLB Stats API."""
+    client = MLBClient()
+    try:
+        data = client._get('/teams/stats', {
+            'stats': 'season',
+            'group': 'hitting',
+            'season': str(season),
+            'sportId': 1,
+        })
+        rows = []
+        for stat_block in data.get('stats', []):
+            for split in stat_block.get('splits', []):
+                team = split.get('team', {}) or {}
+                stat = split.get('stat', {}) or {}
+                rows.append({
+                    'team_id': coerce_int(team.get('id'), 0),
+                    'team_name': clean_text(team.get('name')),
+                    'gamesPlayed': coerce_int(stat.get('gamesPlayed'), 0),
+                    'runs': coerce_int(stat.get('runs'), 0),
+                    'hits': coerce_int(stat.get('hits'), 0),
+                    'homeRuns': coerce_int(stat.get('homeRuns'), 0),
+                    'stolenBases': coerce_int(stat.get('stolenBases'), 0),
+                    'baseOnBalls': coerce_int(stat.get('baseOnBalls'), 0),
+                    'strikeOuts': coerce_int(stat.get('strikeOuts'), 0),
+                    'plateAppearances': coerce_int(stat.get('plateAppearances'), 0),
+                    'atBats': coerce_int(stat.get('atBats'), 0),
+                    'avg': coerce_float(stat.get('avg'), 0.0),
+                    'obp': coerce_float(stat.get('obp'), 0.0),
+                    'slg': coerce_float(stat.get('slg'), 0.0),
+                    'ops': coerce_float(stat.get('ops'), 0.0),
+                    'rbi': coerce_int(stat.get('rbi'), 0),
+                    'doubles': coerce_int(stat.get('doubles'), 0),
+                    'triples': coerce_int(stat.get('triples'), 0),
+                })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df, f'No hitting stats returned for {season}.'
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+def get_league_pitching_stats(season: int) -> tuple[pd.DataFrame, str | None]:
+    """Fetch MLB-wide team pitching stats from the MLB Stats API."""
+    client = MLBClient()
+    try:
+        data = client._get('/teams/stats', {
+            'stats': 'season',
+            'group': 'pitching',
+            'season': str(season),
+            'sportId': 1,
+        })
+        rows = []
+        for stat_block in data.get('stats', []):
+            for split in stat_block.get('splits', []):
+                team = split.get('team', {}) or {}
+                stat = split.get('stat', {}) or {}
+                rows.append({
+                    'team_id': coerce_int(team.get('id'), 0),
+                    'team_name': clean_text(team.get('name')),
+                    'gamesPlayed': coerce_int(stat.get('gamesPlayed'), 0),
+                    'era': coerce_float(stat.get('era'), 0.0),
+                    'whip': coerce_float(stat.get('whip'), 0.0),
+                    'strikeOuts': coerce_int(stat.get('strikeOuts'), 0),
+                    'baseOnBalls': coerce_int(stat.get('baseOnBalls'), 0),
+                    'homeRunsPer9': coerce_float(stat.get('homeRunsPer9'), 0.0),
+                    'qualityStarts': coerce_int(stat.get('qualityStarts'), 0),
+                    'saves': coerce_int(stat.get('saves'), 0),
+                    'holds': coerce_int(stat.get('holds'), 0),
+                    'blownSaves': coerce_int(stat.get('blownSaves'), 0),
+                    'inningsPitched': coerce_float(stat.get('inningsPitched'), 0.0),
+                    'hits': coerce_int(stat.get('hits'), 0),
+                    'earnedRuns': coerce_int(stat.get('earnedRuns'), 0),
+                    'saveOpportunities': coerce_int(stat.get('saveOpportunities'), 0),
+                    'battersFaced': coerce_int(stat.get('battersFaced'), 0),
+                })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df, f'No pitching stats returned for {season}.'
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+def get_league_fielding_stats(season: int) -> tuple[pd.DataFrame, str | None]:
+    """Fetch MLB-wide team fielding stats from the MLB Stats API."""
+    client = MLBClient()
+    try:
+        data = client._get('/teams/stats', {
+            'stats': 'season',
+            'group': 'fielding',
+            'season': str(season),
+            'sportId': 1,
+        })
+        rows = []
+        for stat_block in data.get('stats', []):
+            for split in stat_block.get('splits', []):
+                team = split.get('team', {}) or {}
+                stat = split.get('stat', {}) or {}
+                rows.append({
+                    'team_id': coerce_int(team.get('id'), 0),
+                    'team_name': clean_text(team.get('name')),
+                    'gamesPlayed': coerce_int(stat.get('gamesPlayed'), 0),
+                    'errors': coerce_int(stat.get('errors'), 0),
+                    'fieldingPercentage': coerce_float(stat.get('fieldingPercentage'), 0.0),
+                    'doublePlays': coerce_int(stat.get('doublePlays'), 0),
+                    'assists': coerce_int(stat.get('assists'), 0),
+                    'putOuts': coerce_int(stat.get('putOuts'), 0),
+                    'chances': coerce_int(stat.get('chances'), 0),
+                    'rangeFactorPerGame': coerce_float(stat.get('rangeFactorPerGame'), 0.0),
+                })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df, f'No fielding stats returned for {season}.'
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+def get_individual_pitcher_stats(season: int) -> tuple[pd.DataFrame, str | None]:
+    """Get individual pitcher stats for SP/RP classification and team-level aggregation."""
+    client = MLBClient()
+    try:
+        data = client._get('/stats', {
+            'stats': 'season',
+            'group': 'pitching',
+            'season': str(season),
+            'sportId': 1,
+            'playerPool': 'all',
+            'limit': 2000,
+        })
+        rows = []
+        for stat_block in data.get('stats', []):
+            for split in stat_block.get('splits', []):
+                player = split.get('player', {}) or {}
+                team = split.get('team', {}) or {}
+                stat = split.get('stat', {}) or {}
+                games_played = coerce_int(stat.get('gamesPlayed'), 0)
+                games_started = coerce_int(stat.get('gamesStarted'), 0)
+                if games_played == 0:
+                    continue
+                ip = coerce_float(stat.get('inningsPitched'), 0.0)
+                bfp = coerce_int(stat.get('battersFaced'), 0)
+                hr = coerce_int(stat.get('homeRuns'), 0)
+                # Classify role: starter if ≥50% of appearances are starts
+                role = 'SP' if (games_started / games_played) >= 0.5 else 'RP'
+                rows.append({
+                    'player_id': coerce_int(player.get('id'), 0),
+                    'player_name': clean_text(player.get('fullName')),
+                    'team_id': coerce_int(team.get('id'), 0),
+                    'team_name': clean_text(team.get('name')),
+                    'games_played': games_played,
+                    'games_started': games_started,
+                    'role': role,
+                    'innings_pitched': ip,
+                    'strikeouts': coerce_int(stat.get('strikeOuts'), 0),
+                    'walks': coerce_int(stat.get('baseOnBalls'), 0),
+                    'hits_allowed': coerce_int(stat.get('hits'), 0),
+                    'earned_runs': coerce_int(stat.get('earnedRuns'), 0),
+                    'home_runs': hr,
+                    'quality_starts': coerce_int(stat.get('qualityStarts'), 0),
+                    'saves': coerce_int(stat.get('saves'), 0),
+                    'holds': coerce_int(stat.get('holds'), 0),
+                    'blown_saves': coerce_int(stat.get('blownSaves'), 0),
+                    'save_opportunities': coerce_int(stat.get('saveOpportunities'), 0),
+                    'batters_faced': bfp,
+                })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df, f'No individual pitcher data returned for {season}.'
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+def get_war_leaderboard_data(season: int) -> tuple[pd.DataFrame, pd.DataFrame, str | None]:
+    """Get WAR leaderboard data from FanGraphs via pybaseball."""
+    try:
+        from pybaseball import batting_stats, pitching_stats  # type: ignore
+        bat = batting_stats(season, qual=0)
+        pit = pitching_stats(season, qual=0)
+        bat_df = bat if (bat is not None and not bat.empty) else pd.DataFrame()
+        pit_df = pit if (pit is not None and not pit.empty) else pd.DataFrame()
+        return bat_df, pit_df, None
+    except ImportError:
+        return pd.DataFrame(), pd.DataFrame(), 'pybaseball not installed; WAR unavailable.'
+    except Exception as exc:
+        return pd.DataFrame(), pd.DataFrame(), f'WAR data unavailable: {exc}'

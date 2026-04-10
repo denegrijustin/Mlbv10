@@ -185,5 +185,55 @@ def render_spray_chart(statcast_df: pd.DataFrame, chart_type: str = 'offensive')
         ),
         margin=dict(l=50, r=50, t=50, b=50),
     )
-    
+
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
+
+
+def render_rankings_bar(
+    df: pd.DataFrame,
+    stat_col: str,
+    title: str,
+    ascending: bool = False,
+    n: int = 10,
+    color: str | None = None,
+) -> None:
+    """Render a horizontal bar chart for team rankings in a given stat.
+
+    Args:
+        df: DataFrame with at least 'Team' and stat_col columns.
+        stat_col: Column name of the stat to chart.
+        title: Chart title.
+        ascending: If True, show lowest values (e.g., for ERA).
+        n: Number of teams to display.
+        color: Optional bar color hex string.
+    """
+    if df.empty or stat_col not in df.columns or 'Team' not in df.columns:
+        st.info(f'No data available for {title} chart.')
+        return
+
+    chart_df = df[['Team', stat_col]].copy()
+    chart_df[stat_col] = pd.to_numeric(chart_df[stat_col], errors='coerce')
+    chart_df = chart_df.dropna(subset=[stat_col])
+    if chart_df.empty:
+        st.info(f'No numeric data for {title} chart.')
+        return
+
+    chart_df = chart_df.sort_values(stat_col, ascending=ascending).head(n)
+
+    fig = px.bar(
+        chart_df,
+        x=stat_col,
+        y='Team',
+        orientation='h',
+        title=title,
+        text=stat_col,
+        color_discrete_sequence=[color or '#1f77b4'],
+    )
+    fig.update_layout(
+        height=max(300, n * 35),
+        margin=dict(l=130, r=40, t=50, b=20),
+        yaxis={'categoryorder': 'total ascending' if not ascending else 'total descending'},
+        showlegend=False,
+    )
+    fig.update_traces(texttemplate='%{text}', textposition='outside')
     st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())
