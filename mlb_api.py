@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import StringIO
 from typing import Any
+from datetime import date
 
 import pandas as pd
 import requests
@@ -11,9 +12,9 @@ from formatting import clean_text, coerce_float, coerce_int
 
 BASE_URL = 'https://statsapi.mlb.com/api/v1'
 STATCAST_URL = 'https://baseballsavant.mlb.com/statcast_search/csv'
-TIMEOUT = 25
+TIMEOUT = 30
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0',
+    'User-Agent': 'Mozilla/5.0 (compatible; MLBDashboard/1.0)',
     'Accept': 'application/json,text/csv,*/*',
 }
 
@@ -63,6 +64,20 @@ class MLBClient:
             return pd.read_csv(StringIO(text))
         except Exception as exc:
             raise MLBApiError(f'Statcast CSV parse failed. {exc}') from exc
+
+    def get_team_stats(self, season: int, group: str) -> list[dict[str, Any]]:
+        """Get season stats for all teams in a stat group (hitting/pitching/fielding)."""
+        data = self._get('/teams/stats', {
+            'stats': 'season',
+            'group': group,
+            'season': season,
+            'sportId': 1,
+            'gameType': 'R',
+        })
+        splits: list[dict[str, Any]] = []
+        for stat_block in data.get('stats', []):
+            splits.extend(stat_block.get('splits', []))
+        return splits
 
 
 FALLBACK_TEAMS = [
@@ -168,6 +183,167 @@ def build_season_df(team_id: int, season: int, end_date: str) -> tuple[pd.DataFr
         return _games_to_df([]), str(exc)
 
 
+def build_season_linescore_df(team_id: int, season: int, end_date: str) -> tuple[pd.DataFrame, str | None]:
+    """Fetch full-season schedule with linescore hydration for inning-by-inning runs."""
+    client = MLBClient()
+    try:
+        games = client.get_schedule({
+            'sportId': 1,
+            'teamId': team_id,
+            'startDate': f'{season}-01-01',
+            'endDate': end_date,
+            'gameType': 'R',
+            'hydrate': 'linescore',
+        })
+        rows: list[dict[str, Any]] = []
+        for g in games:
+            status_obj = g.get('status') or {}
+            abstract_state = status_obj.get('abstractGameState', '')
+            if abstract_state != 'Final':
+                continue
+            game_pk = coerce_int(g.get('gamePk'), 0)
+            official_date = clean_text(g.get('officialDate'), '')
+            teams = g.get('teams', {})
+            home_id = coerce_int(((teams.get('home') or {}).get('team') or {}).get('id'), 0)
+            is_home = (home_id == team_id)
+            location = 'Home' if is_home else 'Away'
+            linescore = g.get('linescore') or {}
+            innings = linescore.get('innings') or []
+            for inning_obj in innings:
+                inn_num = coerce_int(inning_obj.get('num'), 0)
+                home_runs = coerce_int((inning_obj.get('home') or {}).get('runs'), 0)
+                away_runs = coerce_int((inning_obj.get('away') or {}).get('runs'), 0)
+                team_runs = home_runs if is_home else away_runs
+                opp_runs = away_runs if is_home else home_runs
+                rows.append({
+                    'gamePk': game_pk,
+                    'date': official_date,
+                    'inning': inn_num,
+                    'team_runs': team_runs,
+                    'opp_runs': opp_runs,
+                    'location': location,
+                })
+        if not rows:
+            return pd.DataFrame(columns=['gamePk', 'date', 'inning', 'team_runs', 'opp_runs', 'location']), None
+        return pd.DataFrame(rows), None
+    except Exception as exc:
+        return pd.DataFrame(columns=['gamePk', 'date', 'inning', 'team_runs', 'opp_runs', 'location']), str(exc)
+
+
+def _extract_last10(team_record: dict[str, Any]) -> str:
+    """Safely extract the last 10 games W-L record from a team standings record."""
+    try:
+        split_records = (team_record.get('records') or {}).get('splitRecords') or []
+        # The last-10 entry is typically the entry with type='last' or the one labelled 'Last 10'
+        for entry in split_records:
+            if str(entry.get('type', '')).lower() in ('last', 'last10', 'last_ten'):
+                return f"{entry.get('wins', '-')}-{entry.get('losses', '-')}"
+        # Fallback: use first entry if present
+        if split_records:
+            first = split_records[0]
+            return f"{first.get('wins', '-')}-{first.get('losses', '-')}"
+    except Exception:
+        pass
+    return '-'
+
+
+def get_division_standings(season: int) -> tuple[pd.DataFrame, str | None]:
+    """Get current division standings for all divisions."""
+    client = MLBClient()
+    try:
+        data = client.get_standings({
+            'leagueId': '103,104',
+            'standingsTypes': 'regularSeason',
+            'season': season,
+            'hydrate': 'team,division',
+        })
+        rows = []
+        for div_record in data.get('records', []):
+            div_info = div_record.get('division') or {}
+            div_name = clean_text(div_info.get('name'), 'Unknown Division')
+            for tr in div_record.get('teamRecords', []):
+                team_info = tr.get('team') or {}
+                rows.append({
+                    'division': div_name,
+                    'team_id': coerce_int(team_info.get('id'), 0),
+                    'team_name': clean_text(team_info.get('name')),
+                    'wins': coerce_int(tr.get('wins'), 0),
+                    'losses': coerce_int(tr.get('losses'), 0),
+                    'pct': clean_text(tr.get('winningPercentage'), '.000'),
+                    'gb': clean_text(tr.get('gamesBack'), '-'),
+                    'streak': clean_text((tr.get('streak') or {}).get('streakCode'), '-'),
+                    'last10': _extract_last10(tr),
+                    'runs_scored': coerce_int((tr.get('runsScored')), 0),
+                    'runs_allowed': coerce_int((tr.get('runsAllowed')), 0),
+                    'div_rank': coerce_int(tr.get('divisionRank'), 0),
+                    'wc_rank': clean_text(tr.get('wildCardRank'), '-'),
+                    'elimination_number': clean_text(tr.get('eliminationNumber'), '-'),
+                })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df, None
+        return df.sort_values(['division', 'div_rank']).reset_index(drop=True), None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
+
+
+def get_wildcard_standings(season: int) -> tuple[pd.DataFrame, str | None]:
+    client = MLBClient()
+    try:
+        data = client.get_standings({
+            'leagueId': '103,104',
+            'standingsTypes': 'wildCard',
+            'season': season,
+        })
+        rows = []
+        for division_data in data.get('records', []):
+            for team_record in division_data.get('teamRecords', []):
+                team_info = team_record.get('team', {})
+                wc_rank = team_record.get('wildCardRank')
+                rows.append({
+                    'team_id': coerce_int(team_info.get('id'), 0),
+                    'team_name': clean_text(team_info.get('name')),
+                    'wildcard_rank': wc_rank if wc_rank else None,
+                    'wins': coerce_int(team_record.get('wins'), 0),
+                    'losses': coerce_int(team_record.get('losses'), 0),
+                    'pct': clean_text(team_record.get('winningPercentage'), '.000'),
+                    'gb': clean_text(team_record.get('gamesBack'), '-'),
+                    'wc_gb': clean_text(team_record.get('wildCardGamesBack'), '-'),
+                })
+        df = pd.DataFrame(rows)
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(columns=['team_id', 'team_name', 'wildcard_rank', 'wins', 'losses']), str(exc)
+
+
+def get_all_teams_stats(season: int) -> tuple[dict[str, pd.DataFrame], str | None]:
+    """Fetch hitting, pitching, and fielding stats for all teams in one call each."""
+    client = MLBClient()
+    results: dict[str, pd.DataFrame] = {}
+    errors = []
+
+    for group in ('hitting', 'pitching', 'fielding'):
+        try:
+            splits = client.get_team_stats(season, group)
+            rows = []
+            for split in splits:
+                team_obj = split.get('team') or {}
+                stat = split.get('stat') or {}
+                row = {
+                    'team_id': coerce_int(team_obj.get('id'), 0),
+                    'team_name': clean_text(team_obj.get('name')),
+                }
+                row.update({k: v for k, v in stat.items()})
+                rows.append(row)
+            results[group] = pd.DataFrame(rows)
+        except Exception as exc:
+            results[group] = pd.DataFrame()
+            errors.append(f'{group}: {exc}')
+
+    err = '; '.join(errors) if errors else None
+    return results, err
+
+
 def choose_live_game_pk(schedule_df: pd.DataFrame) -> int | None:
     if schedule_df.empty:
         return None
@@ -196,6 +372,24 @@ def get_live_summary(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
             teams = game_data.get('teams', {})
             away = teams.get('away', {})
             home = teams.get('home', {})
+            # Extract current play info
+            plays = live_data.get('plays', {})
+            current_play = plays.get('currentPlay', {})
+            matchup = current_play.get('matchup', {})
+            batter = (matchup.get('batter') or {}).get('fullName', '-')
+            pitcher = (matchup.get('pitcher') or {}).get('fullName', '-')
+            # Recent plays for play-by-play
+            all_plays = plays.get('allPlays', [])
+            recent = []
+            for p in reversed(all_plays[-10:]):
+                result = p.get('result', {})
+                about = p.get('about', {})
+                recent.append({
+                    'inning': about.get('inning', '-'),
+                    'half': about.get('halfInning', '-'),
+                    'description': result.get('description', '-'),
+                    'event': result.get('event', '-'),
+                })
             return {
                 'gamePk': game_pk,
                 'away_team': clean_text(away.get('name')),
@@ -208,6 +402,9 @@ def get_live_summary(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
                 'balls': coerce_int(linescore.get('balls'), 0),
                 'strikes': coerce_int(linescore.get('strikes'), 0),
                 'outs': coerce_int(linescore.get('outs'), 0),
+                'batter': batter,
+                'pitcher': pitcher,
+                'recent_plays': recent,
             }, None
         except Exception as exc:
             if attempt == max_retries - 1:
@@ -215,33 +412,80 @@ def get_live_summary(game_pk: int | None) -> tuple[dict[str, Any], str | None]:
     return {}, 'Live feed unavailable'
 
 
-def get_wildcard_standings(season: int) -> tuple[pd.DataFrame, str | None]:
-    client = MLBClient()
+def get_war_leaders(season: int, n: int = 50) -> tuple[pd.DataFrame, str | None]:
+    """Get WAR leaders. Tries FanGraphs (pybaseball), falls back to Baseball-Reference."""
+    # Method 1: pybaseball / FanGraphs
     try:
-        data = client.get_standings({
-            'leagueId': '103,104',
-            'standingsTypes': 'wildCard',
-            'season': season,
-        })
-        rows = []
-        for division_data in data.get('records', []):
-            for team_record in division_data.get('teamRecords', []):
-                team_info = team_record.get('team', {})
-                wc_rank = team_record.get('wildCardRank')
-                rows.append({
-                    'team_id': coerce_int(team_info.get('id'), 0),
-                    'team_name': clean_text(team_info.get('name')),
-                    'wildcard_rank': wc_rank if wc_rank else None,
-                    'wins': coerce_int(team_record.get('wins'), 0),
-                    'losses': coerce_int(team_record.get('losses'), 0),
-                })
-        df = pd.DataFrame(rows)
-        return df, None
-    except Exception as exc:
-        return pd.DataFrame(columns=['team_id', 'team_name', 'wildcard_rank', 'wins', 'losses']), str(exc)
+        from pybaseball import batting_stats, pitching_stats
+        bat = batting_stats(season, qual=80)
+        pit = pitching_stats(season, qual=20)
+        bat_cols = {c for c in ['Name', 'Team', 'G', 'PA', 'HR', 'AVG', 'OBP', 'SLG', 'WAR'] if c in bat.columns}
+        pit_cols = {c for c in ['Name', 'Team', 'G', 'IP', 'ERA', 'WHIP', 'SO9', 'WAR'] if c in pit.columns}
+        bat_df = bat[list(bat_cols)].copy()
+        bat_df['Type'] = 'Batting'
+        pit_df = pit[list(pit_cols)].copy()
+        pit_df['Type'] = 'Pitching'
+        combined = pd.concat([bat_df, pit_df], ignore_index=True, sort=False)
+        combined['WAR'] = pd.to_numeric(combined['WAR'], errors='coerce')
+        combined = combined.dropna(subset=['WAR']).sort_values('WAR', ascending=False).head(n)
+        combined['Source'] = 'FanGraphs'
+        return combined.reset_index(drop=True), None
+    except Exception as exc_fg:
+        pass
+
+    # Method 2: Baseball-Reference HTML (batting WAR)
+    try:
+        br_url = f'https://www.baseball-reference.com/leagues/majors/{season}-value-batting.shtml'
+        tables = pd.read_html(br_url, flavor='lxml', header=0)
+        for tbl in tables:
+            if 'WAR' in tbl.columns and 'Name' in tbl.columns:
+                df = tbl.copy()
+                # Remove header rows repeated in the table
+                df = df[df['Name'].astype(str).str.strip() != 'Name']
+                df = df[df['Name'].astype(str).str.strip().ne('')]
+                df = df.dropna(subset=['WAR'])
+                df['WAR'] = pd.to_numeric(df['WAR'], errors='coerce')
+                df = df.dropna(subset=['WAR']).sort_values('WAR', ascending=False).head(n)
+                keep = [c for c in ['Name', 'Tm', 'G', 'PA', 'HR', 'BA', 'OBP', 'SLG', 'WAR'] if c in df.columns]
+                df = df[keep].rename(columns={'Name': 'Player', 'Tm': 'Team', 'BA': 'AVG'})
+                df['Type'] = 'Batting'
+                df['Source'] = 'Baseball-Reference'
+                return df.reset_index(drop=True), 'FanGraphs unavailable. Showing Baseball-Reference batting WAR.'
+    except Exception as exc_br:
+        pass
+
+    # Method 3: BR pitching WAR fallback
+    try:
+        br_pit_url = f'https://www.baseball-reference.com/leagues/majors/{season}-value-pitching.shtml'
+        tables = pd.read_html(br_pit_url, flavor='lxml', header=0)
+        for tbl in tables:
+            if 'WAR' in tbl.columns and 'Name' in tbl.columns:
+                df = tbl.copy()
+                df = df[df['Name'].astype(str).str.strip() != 'Name']
+                df = df.dropna(subset=['WAR'])
+                df['WAR'] = pd.to_numeric(df['WAR'], errors='coerce')
+                df = df.dropna(subset=['WAR']).sort_values('WAR', ascending=False).head(n)
+                keep = [c for c in ['Name', 'Tm', 'G', 'IP', 'ERA', 'WHIP', 'WAR'] if c in df.columns]
+                df = df[keep].rename(columns={'Name': 'Player', 'Tm': 'Team'})
+                df['Type'] = 'Pitching'
+                df['Source'] = 'Baseball-Reference'
+                return df.reset_index(drop=True), 'FanGraphs unavailable. Showing Baseball-Reference pitching WAR.'
+    except Exception:
+        pass
+
+    return pd.DataFrame(columns=['Player', 'Team', 'WAR', 'Type', 'Source']), (
+        f'WAR data temporarily unavailable. FanGraphs returned an error. '
+        f'Baseball-Reference page could not be parsed. Try refreshing.'
+    )
 
 
-def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_type: str = 'batter') -> tuple[pd.DataFrame, str | None]:
+def get_statcast_team_df(
+    team_abbr: str,
+    start_date: str,
+    end_date: str,
+    player_type: str = 'batter',
+) -> tuple[pd.DataFrame, str | None]:
+    """Fetch Statcast pitch-level data for a team over a date range."""
     team_code = clean_text(team_abbr, '').upper()
     if not team_code:
         return pd.DataFrame(), 'Team abbreviation missing for Statcast lookup.'
@@ -268,9 +512,48 @@ def get_statcast_team_df(team_abbr: str, start_date: str, end_date: str, player_
         if df is None or df.empty:
             return pd.DataFrame(), 'Statcast returned no rows for the selected window.'
         out = df.copy()
-        for col in ['launch_speed', 'launch_angle', 'hit_distance_sc', 'release_speed', 'release_spin_rate', 'estimated_woba_using_speedangle', 'woba_value', 'hc_x', 'hc_y']:
+        for col in [
+            'launch_speed', 'launch_angle', 'hit_distance_sc',
+            'release_speed', 'release_spin_rate',
+            'estimated_woba_using_speedangle', 'woba_value',
+            'hc_x', 'hc_y',
+        ]:
             if col in out.columns:
                 out[col] = out[col].apply(coerce_float)
         return out, None
     except Exception as exc:
         return pd.DataFrame(), str(exc)
+
+
+def get_statcast_season_df(
+    team_abbr: str,
+    season: int,
+    player_type: str = 'batter',
+) -> tuple[pd.DataFrame, str | None]:
+    """Fetch full-season Statcast data for spray charts and HR analysis."""
+    today = date.today().isoformat()
+    start = f'{season}-03-01'
+    return get_statcast_team_df(team_abbr, start, today, player_type)
+
+
+def get_team_roster_names(team_id: int, season: int) -> tuple[list[str], str | None]:
+    """Return sorted list of active batter names for the team."""
+    client = MLBClient()
+    try:
+        data = client._get('/roster', {
+            'teamId': team_id,
+            'season': season,
+            'rosterType': 'active',
+        })
+        names = []
+        for entry in data.get('roster', []):
+            person = entry.get('person') or {}
+            position = entry.get('position') or {}
+            pos_type = position.get('type', '')
+            if pos_type != 'Pitcher':
+                full_name = clean_text(person.get('fullName'), '')
+                if full_name and full_name != '-':
+                    names.append(full_name)
+        return sorted(names), None
+    except Exception as exc:
+        return [], str(exc)
