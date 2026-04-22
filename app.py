@@ -313,8 +313,8 @@ with tab_opponents:
                         s_end = opp.get('series_end', '')
                         try:
                             from datetime import datetime as _dt
-                            fmt_start = _dt.strptime(s_start, '%Y-%m-%d').strftime('%b %-d') if s_start else 'TBD'
-                            fmt_end = _dt.strptime(s_end, '%Y-%m-%d').strftime('%b %-d') if s_end else ''
+                            fmt_start = _dt.strptime(s_start, '%Y-%m-%d').strftime('%b %d').replace(' 0', ' ') if s_start else 'TBD'
+                            fmt_end = _dt.strptime(s_end, '%Y-%m-%d').strftime('%b %d').replace(' 0', ' ') if s_end else ''
                         except ValueError:
                             fmt_start, fmt_end = s_start, s_end
                         date_range = f"{fmt_start} – {fmt_end}" if fmt_end and fmt_end != fmt_start else fmt_start
