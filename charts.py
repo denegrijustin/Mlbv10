@@ -733,7 +733,7 @@ def render_hr_3d_chart(hr_df: pd.DataFrame) -> None:
             ),
         ))
 
-        # Star marker at peak height
+        # Diamond marker at peak height
         peak_idx = int(np.argmax(z_arr))
         fig.add_trace(go.Scatter3d(
             x=[x_arr[peak_idx]], y=[0], z=[z_arr[peak_idx]],

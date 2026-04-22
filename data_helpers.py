@@ -976,7 +976,7 @@ def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> tuple[dic
         try:
             spd = float(row[ev_col]) if ev_col else float('nan')
             ang = float(row[angle_col]) if angle_col else float('nan')
-            if spd > 0 and ang > 0:
+            if spd > 0 and ang > 0:  # negative/zero angles yield no vertical component
                 v0_fps = spd * 1.46667
                 vz = v0_fps * math.sin(math.radians(ang))
                 h = (vz ** 2) / (2 * _G)
