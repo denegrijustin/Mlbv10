@@ -193,11 +193,11 @@ def build_summary_df(snapshot: dict[str, Any]) -> pd.DataFrame:
 def build_trend_df(season_df: pd.DataFrame, team_name: str) -> pd.DataFrame:
     games = _team_games(season_df, team_name)
     if games.empty:
-        return pd.DataFrame(columns=['Metric', 'Value', 'Trend'])
+        return pd.DataFrame(columns=['Metric', 'Value', 'Signal', 'Compared To'])
 
     finals = games[games['is_final']].copy()
     if finals.empty:
-        return pd.DataFrame(columns=['Metric', 'Value', 'Trend'])
+        return pd.DataFrame(columns=['Metric', 'Value', 'Signal', 'Compared To'])
 
     last_10 = finals.tail(10)
     last_5 = finals.tail(5)
@@ -216,30 +216,34 @@ def build_trend_df(season_df: pd.DataFrame, team_name: str) -> pd.DataFrame:
     away_split = finals[finals['location'] == 'Away']
 
     rows = [
-        {'Metric': 'Season Avg Runs For', 'Value': str(round(season_rf, 2)), 'Trend': '🟡 Baseline'},
-        {'Metric': 'Season Avg Runs Against', 'Value': str(round(season_ra, 2)), 'Trend': '🟡 Baseline'},
-        {'Metric': 'Last 5 Avg Runs For', 'Value': str(round(last5_rf, 2)), 'Trend': stoplight(last5_rf - prev5_rf)},
-        {'Metric': 'Last 5 Avg Runs Against', 'Value': str(round(last5_ra, 2)), 'Trend': stoplight(prev5_ra - last5_ra)},
+        {'Metric': 'Season Avg Runs For', 'Value': str(round(season_rf, 2)), 'Signal': '🟡 Reference', 'Compared To': 'Season baseline'},
+        {'Metric': 'Season Avg Runs Against', 'Value': str(round(season_ra, 2)), 'Signal': '🟡 Reference', 'Compared To': 'Season baseline'},
+        {'Metric': 'Last 5 Avg Runs For', 'Value': str(round(last5_rf, 2)), 'Signal': stoplight(last5_rf - prev5_rf), 'Compared To': f'Prev 5 avg: {round(prev5_rf, 2)}'},
+        {'Metric': 'Last 5 Avg Runs Against', 'Value': str(round(last5_ra, 2)), 'Signal': stoplight(prev5_ra - last5_ra), 'Compared To': f'Prev 5 avg: {round(prev5_ra, 2)}'},
         {
             'Metric': 'Last 10 Record',
             'Value': format_record(last10_wins, len(last_10) - last10_wins),
-            'Trend': stoplight((last10_wins / max(len(last_10), 1)) - 0.5),
+            'Signal': stoplight((last10_wins / max(len(last_10), 1)) - 0.5),
+            'Compared To': '.500 (break-even)',
         },
         {
             'Metric': 'Last 10 Run Differential / Game',
             'Value': str(round(last_10['run_diff'].mean(), 2)),
-            'Trend': stoplight(last_10['run_diff'].mean()),
+            'Signal': stoplight(last_10['run_diff'].mean()),
+            'Compared To': '0.0 (break-even)',
         },
-        {'Metric': 'Scoring Consistency Std Dev', 'Value': str(consistency), 'Trend': stoplight(2.5 - consistency)},
+        {'Metric': 'Scoring Consistency Std Dev', 'Value': str(consistency), 'Signal': stoplight(2.5 - consistency), 'Compared To': '< 2.5 is consistent'},
         {
             'Metric': 'Home Avg Runs',
             'Value': str(round(home_split['team_runs'].mean(), 2)) if not home_split.empty else '0.0',
-            'Trend': '🟡 Split',
+            'Signal': '🏠 Split',
+            'Compared To': 'Home games only',
         },
         {
             'Metric': 'Away Avg Runs',
             'Value': str(round(away_split['team_runs'].mean(), 2)) if not away_split.empty else '0.0',
-            'Trend': '🟡 Split',
+            'Signal': '✈️ Split',
+            'Compared To': 'Away games only',
         },
     ]
     return pd.DataFrame(rows)

@@ -42,8 +42,10 @@ from formatting import coerce_float, coerce_int, format_record
 st.set_page_config(page_title='MLB Analytics Dashboard', layout='wide', initial_sidebar_state='expanded')
 
 st.markdown("""<style>
-.block-container { padding-top: 1rem; padding-bottom: 1rem; }
-.stMetric { background: #1e1e1e; border-radius: 6px; padding: 8px; }
+.block-container { padding-top: 2rem; padding-bottom: 1rem; }
+.stMetric { background: rgba(255,255,255,0.08); border-radius: 6px; padding: 8px; }
+.stMetric .stMetricLabel, .stMetric [data-testid="stMetricLabel"] { color: #CCCCCC !important; }
+.stMetric .stMetricValue, .stMetric [data-testid="stMetricValue"] { color: #FFFFFF !important; }
 h1 { font-size: 1.6rem !important; }
 h2 { font-size: 1.3rem !important; }
 h3 { font-size: 1.1rem !important; }
@@ -168,6 +170,8 @@ with header_cols[5]:
 with header_cols[6]:
     st.metric('RA/G', f"{snapshot.get('avg_runs_against', 0):.2f}")
 
+st.divider()
+
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
@@ -206,6 +210,15 @@ with tab_summary:
         if trend_df.empty:
             st.info('Season trend data is not yet available. Check back once games have been played.')
         else:
+            with st.expander('ℹ️ Signal Legend'):
+                st.markdown(
+                    '🟢 **Up** — performing above the comparison baseline  \n'
+                    '🔴 **Down** — performing below the comparison baseline  \n'
+                    '🟡 **Even** — near the comparison baseline  \n'
+                    '🟡 **Reference** — this row *is* the season baseline (no comparison)  \n'
+                    '🏠 **Split** — home games subset, no head-to-head comparison  \n'
+                    '✈️ **Split** — away games subset, no head-to-head comparison'
+                )
             st.dataframe(trend_df.astype(str), use_container_width=True, hide_index=True)
 
         st.markdown('#### 🗓️ Recent 10 Games')
