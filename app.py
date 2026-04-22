@@ -280,7 +280,7 @@ with tab_standings:
 
 with tab_opponents:
     with st.spinner('Loading upcoming schedule...'):
-        upcoming_df, up_err = _cached_get_upcoming_schedule(selected_team_id, date.today().isoformat(), 5)
+        upcoming_df, up_err = _cached_get_upcoming_schedule(selected_team_id, date.today().isoformat(), 20)
 
     if debug_mode and up_err:
         st.warning(f'Upcoming schedule: {up_err}')
@@ -297,7 +297,7 @@ with tab_opponents:
         for i, opp in enumerate(next_opponents[:3]):
             with opp_cols[i]:
                 with st.container(border=True):
-                    opp_name = opp.get('team_name', opp.get('opponent', ''))
+                    opp_name = opp.get('team_name', '')
                     opp_meta = get_team_meta(opp_name) or {}
                     opp_logo = opp_meta.get('logo_url', '')
                     opp_id = opp_meta.get('id', 0)
@@ -308,15 +308,39 @@ with tab_opponents:
                             st.image(opp_logo, width=60)
                     with col_info:
                         st.markdown(f"**{opp_name}**")
-                        st.caption(f"Date: {opp.get('date', 'TBD')}")
+                        # Format series date range
+                        s_start = opp.get('series_start', '')
+                        s_end = opp.get('series_end', '')
+                        try:
+                            from datetime import datetime as _dt
+                            fmt_start = _dt.strptime(s_start, '%Y-%m-%d').strftime('%b %-d') if s_start else 'TBD'
+                            fmt_end = _dt.strptime(s_end, '%Y-%m-%d').strftime('%b %-d') if s_end else ''
+                        except ValueError:
+                            fmt_start, fmt_end = s_start, s_end
+                        date_range = f"{fmt_start} – {fmt_end}" if fmt_end and fmt_end != fmt_start else fmt_start
+                        st.caption(f"📅 {date_range}")
                         loc = 'Home' if opp.get('is_home') else 'Away'
-                        st.caption(f"Location: {loc}")
+                        num_games = opp.get('num_games', 1)
+                        st.caption(f"📍 {loc} · {num_games} game{'s' if num_games != 1 else ''}")
 
                     if opp_id:
                         opp_season_df, _ = _cached_build_season_df(opp_id, CURRENT_SEASON)
                         rec = get_team_last_n_record(opp_season_df, opp_name, 10)
+                        # Last game result
+                        last_game_df = build_recent_games_df(opp_season_df, opp_name, 1)
+                        if not last_game_df.empty:
+                            lg = last_game_df.iloc[0]
+                            lg_result = lg.get('Result', '')
+                            lg_runs = lg.get('Team Runs', '')
+                            lg_opp_runs = lg.get('Opp Runs', '')
+                            last_game_str = f"{lg_result} {lg_runs}–{lg_opp_runs}" if lg_result else '—'
+                        else:
+                            last_game_str = '—'
                     else:
                         rec = {'wins': 0, 'losses': 0, 'win_pct': 0.0, 'sample_size': 0, 'games_played': 0}
+                        last_game_str = '—'
+
+                    st.caption(f"🏁 Last Game: **{last_game_str}**")
 
                     w = rec.get('wins', 0)
                     l = rec.get('losses', 0)
@@ -331,7 +355,8 @@ with tab_opponents:
                         else:
                             sl = '🔴'
                         label = f"Last {sample}" if sample < 10 else "Last 10"
-                        st.metric(f"{sl} {label}", f"{w}-{l}", f"{wp:.3f}")
+                        st.markdown(f"**🎯 {label} Record**")
+                        st.metric(f"{sl} W-L", f"{w}-{l}", f"{wp:.3f}")
                     else:
                         st.info('No completed games found for this opponent yet.')
 

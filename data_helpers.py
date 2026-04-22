@@ -786,7 +786,11 @@ def get_team_last_n_record(season_df: pd.DataFrame, team_name: str, n_games: int
 
 
 def get_next_three_opponents(season_df: pd.DataFrame, team_name: str, from_date_str: str) -> list[dict[str, Any]]:
-    """Return next 3 scheduled (not Final) games for team_name after from_date_str."""
+    """Return next 3 upcoming SERIES for team_name after from_date_str.
+
+    Groups consecutive games against the same opponent into a series.
+    Each entry contains: team_name, series_start, series_end, num_games, is_home, game_dates.
+    """
     if season_df.empty or not team_name:
         return []
     df = season_df[(season_df['away'] == team_name) | (season_df['home'] == team_name)].copy()
@@ -794,23 +798,45 @@ def get_next_three_opponents(season_df: pd.DataFrame, team_name: str, from_date_
         return []
     # Filter out Final games
     df = df[~df['status'].astype(str).str.contains('Final', case=False, na=False)]
-    # Filter to games after from_date_str
+    # Filter to games after from_date_str and sort
     date_col = 'officialDate' if 'officialDate' in df.columns else ('gameDate' if 'gameDate' in df.columns else None)
     if date_col:
-        df[date_col] = df[date_col].astype(str)
+        df[date_col] = df[date_col].astype(str).str[:10]
         df = df[df[date_col] > str(from_date_str)]
         df = df.sort_values(date_col)
-    result = []
-    for _, row in df.head(3).iterrows():
+
+    # Group consecutive games against the same opponent into series
+    series_list: list[dict[str, Any]] = []
+    current_opponent: str | None = None
+    current_series: dict[str, Any] = {}
+    for _, row in df.iterrows():
         is_home = row.get('home') == team_name
-        opponent = row.get('away') if is_home else row.get('home')
-        result.append({
-            'team_name': str(opponent),
-            'date': str(row.get(date_col, '')) if date_col else '',
-            'is_home': bool(is_home),
-            'game_pk': row.get('game_pk', row.get('gamePk', None)),
-        })
-    return result
+        opponent = str(row.get('away') if is_home else row.get('home'))
+        game_date = str(row.get(date_col, '')) if date_col else ''
+
+        if opponent != current_opponent:
+            if current_series:
+                series_list.append(current_series)
+            if len(series_list) >= 3:
+                break
+            current_opponent = opponent
+            current_series = {
+                'team_name': opponent,
+                'series_start': game_date,
+                'series_end': game_date,
+                'num_games': 1,
+                'is_home': bool(is_home),
+                'game_dates': [game_date],
+            }
+        else:
+            current_series['series_end'] = game_date
+            current_series['num_games'] += 1
+            current_series['game_dates'].append(game_date)
+
+    if current_series and len(series_list) < 3:
+        series_list.append(current_series)
+
+    return series_list[:3]
 
 
 def get_team_trend_snapshot(season_df: pd.DataFrame, team_name: str, games_window: int = 30) -> dict[str, Any]:
