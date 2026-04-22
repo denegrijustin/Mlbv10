@@ -31,7 +31,7 @@ from charts import (
     render_rolling_chart, render_pitch_mix_chart,
     render_statcast_scatter, render_spray_chart,
     render_monte_carlo_results, render_division_standings_table,
-    render_wildcard_standings_table,
+    render_wildcard_standings_table, render_hr_3d_chart,
 )
 from formatting import coerce_float, coerce_int, format_record
 
@@ -462,7 +462,7 @@ with tab_hr:
     with st.spinner('Loading HR data...'):
         sc_batter_df_hr, sc_bat_err_hr = _cached_get_statcast(abbr, start_sc, end_sc, 'batter')
 
-    hr_summary = get_home_run_distance_summary(sc_batter_df_hr)
+    hr_summary, hr_df = get_home_run_distance_summary(sc_batter_df_hr)
 
     col_home, col_away, col_total = st.columns(3)
     with col_home:
@@ -490,11 +490,20 @@ with tab_hr:
             st.markdown('#### ⚾ All HRs')
             n = hr_summary.get('total_hr_count', 0)
             dist = hr_summary.get('total_avg_distance', None)
+            max_h = hr_summary.get('max_height_ft', None)
+            avg_h = hr_summary.get('avg_height_ft', None)
             st.metric('Total HRs', n if n else 'N/A')
             st.metric('Avg Distance', f"{dist:.0f} ft" if dist else 'N/A')
+            st.metric('🏔️ Max Height', f"{max_h:.0f} ft" if max_h else 'N/A')
+            st.metric('Avg Height', f"{avg_h:.0f} ft" if avg_h else 'N/A')
 
     if hr_summary.get('total_hr_count', 0) == 0:
         st.info('No home run data found in the selected Statcast window. Try increasing the lookback period.')
+
+    # 3D trajectory chart
+    st.markdown('---')
+    st.markdown('#### 🚀 3D Home Run Flight Paths')
+    render_hr_3d_chart(hr_df)
 
 # ===========================================================================
 # TAB 6: Spray Chart

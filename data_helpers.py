@@ -931,32 +931,78 @@ def compare_teams(season_df: pd.DataFrame, team_a_name: str, team_b_name: str, g
 # New functions: Statcast analytics
 # ---------------------------------------------------------------------------
 
-def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> dict[str, Any]:
+def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> tuple[dict[str, Any], pd.DataFrame]:
     """
-    Extract HR events and return home/away split distance/EV summary.
+    Extract HR events and return home/away split distance/EV summary plus a
+    per-HR DataFrame with estimated trajectory heights.
     Uses 'inning_topbot' if present ('Top'=away batter, 'Bot'=home batter).
     """
     _zero: dict[str, Any] = {
         'home_hr_count': 0, 'home_avg_distance': 0.0, 'home_avg_ev': 0.0,
         'away_hr_count': 0, 'away_avg_distance': 0.0, 'away_avg_ev': 0.0,
         'total_hr_count': 0, 'total_avg_distance': 0.0,
+        'max_height_ft': None, 'avg_height_ft': None,
     }
     if statcast_batter_df.empty or 'events' not in statcast_batter_df.columns:
-        return _zero
+        return _zero, pd.DataFrame()
 
     hrs = statcast_batter_df[statcast_batter_df['events'].astype(str) == 'home_run'].copy()
     if hrs.empty:
-        return _zero
+        return _zero, pd.DataFrame()
 
     total_count = len(hrs)
     dist_col = 'hit_distance_sc' if 'hit_distance_sc' in hrs.columns else None
     ev_col = 'launch_speed' if 'launch_speed' in hrs.columns else None
+    angle_col = 'launch_angle' if 'launch_angle' in hrs.columns else None
 
     def _safe_mean(series: pd.Series | None) -> float:
         if series is None or series.empty:
             return 0.0
         v = pd.to_numeric(series, errors='coerce').dropna()
         return round(float(v.mean()), 1) if len(v) else 0.0
+
+    # Resolve player name column
+    if 'player_name' in hrs.columns:
+        name_col = 'player_name'
+    elif 'batter_name' in hrs.columns:
+        name_col = 'batter_name'
+    else:
+        name_col = None
+
+    # Compute per-HR estimated max height using projectile physics
+    _G = 32.174  # ft/s²
+    heights: list[float | None] = []
+    for _, row in hrs.iterrows():
+        try:
+            spd = float(row[ev_col]) if ev_col else float('nan')
+            ang = float(row[angle_col]) if angle_col else float('nan')
+            if spd > 0 and ang > 0:
+                v0_fps = spd * 1.46667
+                vz = v0_fps * math.sin(math.radians(ang))
+                h = (vz ** 2) / (2 * _G)
+                heights.append(round(h, 1))
+            else:
+                heights.append(None)
+        except (TypeError, ValueError):
+            heights.append(None)
+
+    hrs = hrs.copy()
+    hrs['estimated_height_ft'] = heights
+
+    # Build the per-HR output DataFrame
+    hr_df_cols: dict[str, Any] = {
+        'player_name': hrs[name_col] if name_col else 'Unknown',
+        'launch_speed': pd.to_numeric(hrs[ev_col], errors='coerce') if ev_col else np.nan,
+        'launch_angle': pd.to_numeric(hrs[angle_col], errors='coerce') if angle_col else np.nan,
+        'hit_distance_sc': pd.to_numeric(hrs[dist_col], errors='coerce') if dist_col else np.nan,
+        'estimated_height_ft': hrs['estimated_height_ft'],
+    }
+    hr_df = pd.DataFrame(hr_df_cols).reset_index(drop=True)
+
+    # Aggregate height stats
+    valid_heights = [h for h in heights if h is not None]
+    max_height_ft: float | None = round(max(valid_heights), 1) if valid_heights else None
+    avg_height_ft: float | None = round(sum(valid_heights) / len(valid_heights), 1) if valid_heights else None
 
     total_avg_dist = _safe_mean(hrs[dist_col] if dist_col else None)
 
@@ -973,7 +1019,9 @@ def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> dict[str,
             'away_avg_ev': _safe_mean(away_hrs[ev_col] if ev_col else None),
             'total_hr_count': total_count,
             'total_avg_distance': total_avg_dist,
-        }
+            'max_height_ft': max_height_ft,
+            'avg_height_ft': avg_height_ft,
+        }, hr_df
 
     # Fallback: no split available
     return {
@@ -985,7 +1033,9 @@ def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> dict[str,
         'away_avg_ev': 0.0,
         'total_hr_count': total_count,
         'total_avg_distance': total_avg_dist,
-    }
+        'max_height_ft': max_height_ft,
+        'avg_height_ft': avg_height_ft,
+    }, hr_df
 
 
 def build_spray_chart_last_30(statcast_batter_df: pd.DataFrame, days: int = 30) -> pd.DataFrame:
