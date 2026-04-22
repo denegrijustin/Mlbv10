@@ -9,6 +9,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ---------------------------------------------------------------------------
+# Physical / numerical constants
+# ---------------------------------------------------------------------------
+
+_MPH_TO_FPS: float = 1.46667   # miles-per-hour → feet-per-second
+_GRAVITY_FPS2: float = 32.174  # gravitational acceleration (ft/s²)
+_COS_ZERO_EPS: float = 1e-9    # numerical tolerance for near-zero cosine check
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -646,3 +654,120 @@ def render_wildcard_standings_table(
         '</table>'
     )
     st.markdown(table_html, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# HR 3D trajectory chart
+# ---------------------------------------------------------------------------
+
+def render_hr_3d_chart(hr_df: pd.DataFrame) -> None:
+    """Render a 3D Plotly chart showing parabolic home run flight paths."""
+    required = {'launch_speed', 'launch_angle', 'hit_distance_sc'}
+    if hr_df is None or hr_df.empty or not required.issubset(hr_df.columns):
+        st.info('No home run trajectory data available.')
+        return
+
+    plot_df = hr_df.dropna(subset=['launch_speed', 'launch_angle', 'hit_distance_sc']).copy()
+    plot_df = plot_df[
+        (pd.to_numeric(plot_df['launch_speed'], errors='coerce') > 0) &
+        (pd.to_numeric(plot_df['launch_angle'], errors='coerce') > 0) &
+        (pd.to_numeric(plot_df['hit_distance_sc'], errors='coerce') > 0)
+    ]
+    if plot_df.empty:
+        st.info('No home run trajectory data available.')
+        return
+
+    _N_POINTS = 50
+
+    # Plasma color scale mapped to launch_speed
+    speeds = pd.to_numeric(plot_df['launch_speed'], errors='coerce').fillna(0)
+    spd_min, spd_max = speeds.min(), speeds.max()
+    spd_range = (spd_max - spd_min) if spd_max != spd_min else 1.0
+
+    def _plasma_hex(t: float) -> str:
+        # Approximate Plotly Plasma palette: t=0 → deep purple, t=1 → bright yellow
+        # R: 13→243, G: 8→188, B: 135→35
+        r = int(min(255, max(0, 13 + t * 230)))
+        g = int(min(255, max(0, 8 + t * 180)))
+        b = int(min(255, max(0, 135 - t * 100)))
+        return f'rgb({r},{g},{b})'
+
+    fig = go.Figure()
+
+    # Ground plane (semi-transparent)
+    max_dist = float(pd.to_numeric(plot_df['hit_distance_sc'], errors='coerce').max()) * 1.05
+    fig.add_trace(go.Surface(
+        x=np.array([[0, max_dist], [0, max_dist]]),
+        y=np.array([[-30, -30], [30, 30]]),
+        z=np.zeros((2, 2)),
+        colorscale=[[0, 'rgba(30,50,30,0.4)'], [1, 'rgba(30,50,30,0.4)']],
+        showscale=False,
+        opacity=0.35,
+        name='Ground',
+        hoverinfo='skip',
+    ))
+
+    for i, (_, row) in enumerate(plot_df.iterrows()):
+        spd = float(row['launch_speed'])
+        ang = float(row['launch_angle'])
+        dist = float(row['hit_distance_sc'])
+        name = str(row.get('player_name', 'Unknown')) if 'player_name' in row.index else 'Unknown'
+
+        v0_fps = spd * _MPH_TO_FPS
+        ang_rad = math.radians(ang)
+        cos_a = math.cos(ang_rad)
+        tan_a = math.tan(ang_rad)
+
+        x_arr = np.linspace(0, dist, _N_POINTS)
+        if abs(cos_a) < _COS_ZERO_EPS:
+            z_arr = np.zeros(_N_POINTS)
+        else:
+            z_arr = x_arr * tan_a - (_GRAVITY_FPS2 * x_arr ** 2) / (2 * v0_fps ** 2 * cos_a ** 2)
+            z_arr = np.clip(z_arr, 0, None)
+        y_arr = np.zeros(_N_POINTS)
+
+        t = (spd - spd_min) / spd_range
+        color = _plasma_hex(t)
+
+        fig.add_trace(go.Scatter3d(
+            x=x_arr, y=y_arr, z=z_arr,
+            mode='lines',
+            line=dict(color=color, width=4),
+            name=name,
+            hovertemplate=(
+                f'<b>{name}</b><br>'
+                f'EV: {spd:.1f} mph | LA: {ang:.1f}°<br>'
+                f'Dist: {dist:.0f} ft<extra></extra>'
+            ),
+        ))
+
+        # Diamond marker at peak height
+        peak_idx = int(np.argmax(z_arr))
+        fig.add_trace(go.Scatter3d(
+            x=[x_arr[peak_idx]], y=[0], z=[z_arr[peak_idx]],
+            mode='markers',
+            marker=dict(symbol='diamond', size=6, color=color,
+                        line=dict(color='white', width=1)),
+            name=f'{name} peak',
+            hovertemplate=(
+                f'<b>{name}</b> peak<br>'
+                f'Height: {z_arr[peak_idx]:.0f} ft @ {x_arr[peak_idx]:.0f} ft out<extra></extra>'
+            ),
+            showlegend=False,
+        ))
+
+    fig.update_layout(
+        title=dict(text='🏟️ Home Run 3D Flight Paths', font=dict(color='white', size=18)),
+        scene=dict(
+            xaxis=dict(title='Distance (ft)', color='white', gridcolor='#333'),
+            yaxis=dict(title='Direction', color='white', gridcolor='#333'),
+            zaxis=dict(title='Height (ft)', color='white', gridcolor='#333'),
+            bgcolor='#0d1117',
+        ),
+        paper_bgcolor='#0d1117',
+        font=dict(color='white'),
+        height=600,
+        legend=dict(bgcolor='rgba(0,0,0,0.4)', bordercolor='#444', borderwidth=1),
+        margin=dict(l=0, r=0, t=50, b=0),
+    )
+    st.plotly_chart(fig, use_container_width=True, config=_get_plotly_config())

@@ -9,6 +9,13 @@ import pandas as pd
 from formatting import coerce_float, coerce_int, format_record, safe_pct, signed, stoplight
 
 # ---------------------------------------------------------------------------
+# Physical constants
+# ---------------------------------------------------------------------------
+
+_MPH_TO_FPS: float = 1.46667   # miles-per-hour → feet-per-second
+_GRAVITY_FPS2: float = 32.174  # gravitational acceleration (ft/s²)
+
+# ---------------------------------------------------------------------------
 # Pitch description / event classification sets
 # ---------------------------------------------------------------------------
 
@@ -193,11 +200,11 @@ def build_summary_df(snapshot: dict[str, Any]) -> pd.DataFrame:
 def build_trend_df(season_df: pd.DataFrame, team_name: str) -> pd.DataFrame:
     games = _team_games(season_df, team_name)
     if games.empty:
-        return pd.DataFrame(columns=['Metric', 'Value', 'Trend'])
+        return pd.DataFrame(columns=['Metric', 'Value', 'Signal', 'Compared To'])
 
     finals = games[games['is_final']].copy()
     if finals.empty:
-        return pd.DataFrame(columns=['Metric', 'Value', 'Trend'])
+        return pd.DataFrame(columns=['Metric', 'Value', 'Signal', 'Compared To'])
 
     last_10 = finals.tail(10)
     last_5 = finals.tail(5)
@@ -216,30 +223,34 @@ def build_trend_df(season_df: pd.DataFrame, team_name: str) -> pd.DataFrame:
     away_split = finals[finals['location'] == 'Away']
 
     rows = [
-        {'Metric': 'Season Avg Runs For', 'Value': str(round(season_rf, 2)), 'Trend': '🟡 Baseline'},
-        {'Metric': 'Season Avg Runs Against', 'Value': str(round(season_ra, 2)), 'Trend': '🟡 Baseline'},
-        {'Metric': 'Last 5 Avg Runs For', 'Value': str(round(last5_rf, 2)), 'Trend': stoplight(last5_rf - prev5_rf)},
-        {'Metric': 'Last 5 Avg Runs Against', 'Value': str(round(last5_ra, 2)), 'Trend': stoplight(prev5_ra - last5_ra)},
+        {'Metric': 'Season Avg Runs For', 'Value': str(round(season_rf, 2)), 'Signal': '🟡 Reference', 'Compared To': 'Season baseline'},
+        {'Metric': 'Season Avg Runs Against', 'Value': str(round(season_ra, 2)), 'Signal': '🟡 Reference', 'Compared To': 'Season baseline'},
+        {'Metric': 'Last 5 Avg Runs For', 'Value': str(round(last5_rf, 2)), 'Signal': stoplight(last5_rf - prev5_rf), 'Compared To': f'Prev 5 avg: {round(prev5_rf, 2)}'},
+        {'Metric': 'Last 5 Avg Runs Against', 'Value': str(round(last5_ra, 2)), 'Signal': stoplight(prev5_ra - last5_ra), 'Compared To': f'Prev 5 avg: {round(prev5_ra, 2)}'},
         {
             'Metric': 'Last 10 Record',
             'Value': format_record(last10_wins, len(last_10) - last10_wins),
-            'Trend': stoplight((last10_wins / max(len(last_10), 1)) - 0.5),
+            'Signal': stoplight((last10_wins / max(len(last_10), 1)) - 0.5),
+            'Compared To': '.500 (break-even)',
         },
         {
             'Metric': 'Last 10 Run Differential / Game',
             'Value': str(round(last_10['run_diff'].mean(), 2)),
-            'Trend': stoplight(last_10['run_diff'].mean()),
+            'Signal': stoplight(last_10['run_diff'].mean()),
+            'Compared To': '0.0 (break-even)',
         },
-        {'Metric': 'Scoring Consistency Std Dev', 'Value': str(consistency), 'Trend': stoplight(2.5 - consistency)},
+        {'Metric': 'Scoring Consistency Std Dev', 'Value': str(consistency), 'Signal': stoplight(2.5 - consistency), 'Compared To': '< 2.5 is consistent'},
         {
             'Metric': 'Home Avg Runs',
             'Value': str(round(home_split['team_runs'].mean(), 2)) if not home_split.empty else '0.0',
-            'Trend': '🟡 Split',
+            'Signal': '🏠 Split',
+            'Compared To': 'Home games only',
         },
         {
             'Metric': 'Away Avg Runs',
             'Value': str(round(away_split['team_runs'].mean(), 2)) if not away_split.empty else '0.0',
-            'Trend': '🟡 Split',
+            'Signal': '✈️ Split',
+            'Compared To': 'Away games only',
         },
     ]
     return pd.DataFrame(rows)
@@ -782,7 +793,11 @@ def get_team_last_n_record(season_df: pd.DataFrame, team_name: str, n_games: int
 
 
 def get_next_three_opponents(season_df: pd.DataFrame, team_name: str, from_date_str: str) -> list[dict[str, Any]]:
-    """Return next 3 scheduled (not Final) games for team_name after from_date_str."""
+    """Return next 3 upcoming SERIES for team_name after from_date_str.
+
+    Groups consecutive games against the same opponent into a series.
+    Each entry contains: team_name, series_start, series_end, num_games, is_home, game_dates.
+    """
     if season_df.empty or not team_name:
         return []
     df = season_df[(season_df['away'] == team_name) | (season_df['home'] == team_name)].copy()
@@ -790,23 +805,45 @@ def get_next_three_opponents(season_df: pd.DataFrame, team_name: str, from_date_
         return []
     # Filter out Final games
     df = df[~df['status'].astype(str).str.contains('Final', case=False, na=False)]
-    # Filter to games after from_date_str
+    # Filter to games after from_date_str and sort
     date_col = 'officialDate' if 'officialDate' in df.columns else ('gameDate' if 'gameDate' in df.columns else None)
     if date_col:
-        df[date_col] = df[date_col].astype(str)
+        df[date_col] = df[date_col].astype(str).str[:10]
         df = df[df[date_col] > str(from_date_str)]
         df = df.sort_values(date_col)
-    result = []
-    for _, row in df.head(3).iterrows():
+
+    # Group consecutive games against the same opponent into series
+    series_list: list[dict[str, Any]] = []
+    current_opponent: str | None = None
+    current_series: dict[str, Any] = {}
+    for _, row in df.iterrows():
         is_home = row.get('home') == team_name
-        opponent = row.get('away') if is_home else row.get('home')
-        result.append({
-            'team_name': str(opponent),
-            'date': str(row.get(date_col, '')) if date_col else '',
-            'is_home': bool(is_home),
-            'game_pk': row.get('game_pk', row.get('gamePk', None)),
-        })
-    return result
+        opponent = str(row.get('away') if is_home else row.get('home'))
+        game_date = str(row.get(date_col, '')) if date_col else ''
+
+        if opponent != current_opponent:
+            if current_series:
+                series_list.append(current_series)
+            if len(series_list) >= 3:
+                break
+            current_opponent = opponent
+            current_series = {
+                'team_name': opponent,
+                'series_start': game_date,
+                'series_end': game_date,
+                'num_games': 1,
+                'is_home': bool(is_home),
+                'game_dates': [game_date],
+            }
+        else:
+            current_series['series_end'] = game_date
+            current_series['num_games'] += 1
+            current_series['game_dates'].append(game_date)
+
+    if current_series and len(series_list) < 3:
+        series_list.append(current_series)
+
+    return series_list[:3]
 
 
 def get_team_trend_snapshot(season_df: pd.DataFrame, team_name: str, games_window: int = 30) -> dict[str, Any]:
@@ -901,32 +938,77 @@ def compare_teams(season_df: pd.DataFrame, team_a_name: str, team_b_name: str, g
 # New functions: Statcast analytics
 # ---------------------------------------------------------------------------
 
-def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> dict[str, Any]:
+def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> tuple[dict[str, Any], pd.DataFrame]:
     """
-    Extract HR events and return home/away split distance/EV summary.
+    Extract HR events and return home/away split distance/EV summary plus a
+    per-HR DataFrame with estimated trajectory heights.
     Uses 'inning_topbot' if present ('Top'=away batter, 'Bot'=home batter).
     """
     _zero: dict[str, Any] = {
         'home_hr_count': 0, 'home_avg_distance': 0.0, 'home_avg_ev': 0.0,
         'away_hr_count': 0, 'away_avg_distance': 0.0, 'away_avg_ev': 0.0,
         'total_hr_count': 0, 'total_avg_distance': 0.0,
+        'max_height_ft': None, 'avg_height_ft': None,
     }
     if statcast_batter_df.empty or 'events' not in statcast_batter_df.columns:
-        return _zero
+        return _zero, pd.DataFrame()
 
     hrs = statcast_batter_df[statcast_batter_df['events'].astype(str) == 'home_run'].copy()
     if hrs.empty:
-        return _zero
+        return _zero, pd.DataFrame()
 
     total_count = len(hrs)
     dist_col = 'hit_distance_sc' if 'hit_distance_sc' in hrs.columns else None
     ev_col = 'launch_speed' if 'launch_speed' in hrs.columns else None
+    angle_col = 'launch_angle' if 'launch_angle' in hrs.columns else None
 
     def _safe_mean(series: pd.Series | None) -> float:
         if series is None or series.empty:
             return 0.0
         v = pd.to_numeric(series, errors='coerce').dropna()
         return round(float(v.mean()), 1) if len(v) else 0.0
+
+    # Resolve player name column
+    if 'player_name' in hrs.columns:
+        name_col = 'player_name'
+    elif 'batter_name' in hrs.columns:
+        name_col = 'batter_name'
+    else:
+        name_col = None
+
+    # Compute per-HR estimated max height using projectile physics
+    heights: list[float | None] = []
+    for _, row in hrs.iterrows():
+        try:
+            spd = float(row[ev_col]) if ev_col else float('nan')
+            ang = float(row[angle_col]) if angle_col else float('nan')
+            if spd > 0 and ang > 0:  # negative/zero angles yield no vertical component
+                v0_fps = spd * _MPH_TO_FPS
+                vz = v0_fps * math.sin(math.radians(ang))
+                h = (vz ** 2) / (2 * _GRAVITY_FPS2)
+                heights.append(round(h, 1))
+            else:
+                heights.append(None)
+        except (TypeError, ValueError):
+            heights.append(None)
+
+    hrs = hrs.copy()
+    hrs['estimated_height_ft'] = heights
+
+    # Build the per-HR output DataFrame
+    hr_df_cols: dict[str, Any] = {
+        'player_name': hrs[name_col] if name_col else 'Unknown',
+        'launch_speed': pd.to_numeric(hrs[ev_col], errors='coerce') if ev_col else np.nan,
+        'launch_angle': pd.to_numeric(hrs[angle_col], errors='coerce') if angle_col else np.nan,
+        'hit_distance_sc': pd.to_numeric(hrs[dist_col], errors='coerce') if dist_col else np.nan,
+        'estimated_height_ft': hrs['estimated_height_ft'],
+    }
+    hr_df = pd.DataFrame(hr_df_cols).reset_index(drop=True)
+
+    # Aggregate height stats
+    valid_heights = [h for h in heights if h is not None]
+    max_height_ft: float | None = round(max(valid_heights), 1) if valid_heights else None
+    avg_height_ft: float | None = round(sum(valid_heights) / len(valid_heights), 1) if valid_heights else None
 
     total_avg_dist = _safe_mean(hrs[dist_col] if dist_col else None)
 
@@ -943,7 +1025,9 @@ def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> dict[str,
             'away_avg_ev': _safe_mean(away_hrs[ev_col] if ev_col else None),
             'total_hr_count': total_count,
             'total_avg_distance': total_avg_dist,
-        }
+            'max_height_ft': max_height_ft,
+            'avg_height_ft': avg_height_ft,
+        }, hr_df
 
     # Fallback: no split available
     return {
@@ -955,7 +1039,9 @@ def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> dict[str,
         'away_avg_ev': 0.0,
         'total_hr_count': total_count,
         'total_avg_distance': total_avg_dist,
-    }
+        'max_height_ft': max_height_ft,
+        'avg_height_ft': avg_height_ft,
+    }, hr_df
 
 
 def build_spray_chart_last_30(statcast_batter_df: pd.DataFrame, days: int = 30) -> pd.DataFrame:

@@ -2,7 +2,7 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import time
 
 from mlb_api import (
@@ -31,7 +31,7 @@ from charts import (
     render_rolling_chart, render_pitch_mix_chart,
     render_statcast_scatter, render_spray_chart,
     render_monte_carlo_results, render_division_standings_table,
-    render_wildcard_standings_table,
+    render_wildcard_standings_table, render_hr_3d_chart,
 )
 from formatting import coerce_float, coerce_int, format_record
 
@@ -39,11 +39,21 @@ from formatting import coerce_float, coerce_int, format_record
 # Page config
 # ---------------------------------------------------------------------------
 
+def _fmt_series_date(date_str: str) -> str:
+    """Format a YYYY-MM-DD string to 'Mon D' (e.g. 'Apr 5'), or return as-is on failure."""
+    try:
+        return datetime.strptime(date_str, '%Y-%m-%d').strftime('%b %-d')
+    except (ValueError, TypeError):
+        return date_str or 'TBD'
+
+
 st.set_page_config(page_title='MLB Analytics Dashboard', layout='wide', initial_sidebar_state='expanded')
 
 st.markdown("""<style>
-.block-container { padding-top: 1rem; padding-bottom: 1rem; }
-.stMetric { background: #1e1e1e; border-radius: 6px; padding: 8px; }
+.block-container { padding-top: 2rem; padding-bottom: 1rem; }
+.stMetric { background: rgba(255,255,255,0.08); border-radius: 6px; padding: 8px; }
+.stMetric .stMetricLabel, .stMetric [data-testid="stMetricLabel"] { color: #CCCCCC !important; }
+.stMetric .stMetricValue, .stMetric [data-testid="stMetricValue"] { color: #FFFFFF !important; }
 h1 { font-size: 1.6rem !important; }
 h2 { font-size: 1.3rem !important; }
 h3 { font-size: 1.1rem !important; }
@@ -168,6 +178,8 @@ with header_cols[5]:
 with header_cols[6]:
     st.metric('RA/G', f"{snapshot.get('avg_runs_against', 0):.2f}")
 
+st.divider()
+
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
@@ -206,6 +218,15 @@ with tab_summary:
         if trend_df.empty:
             st.info('Season trend data is not yet available. Check back once games have been played.')
         else:
+            with st.expander('ℹ️ Signal Legend'):
+                st.markdown(
+                    '🟢 **Up** — performing above the comparison baseline  \n'
+                    '🔴 **Down** — performing below the comparison baseline  \n'
+                    '🟡 **Even** — near the comparison baseline  \n'
+                    '🟡 **Reference** — this row *is* the season baseline (no comparison)  \n'
+                    '🏠 **Split** — home games subset, no head-to-head comparison  \n'
+                    '✈️ **Split** — away games subset, no head-to-head comparison'
+                )
             st.dataframe(trend_df.astype(str), use_container_width=True, hide_index=True)
 
         st.markdown('#### 🗓️ Recent 10 Games')
@@ -267,7 +288,7 @@ with tab_standings:
 
 with tab_opponents:
     with st.spinner('Loading upcoming schedule...'):
-        upcoming_df, up_err = _cached_get_upcoming_schedule(selected_team_id, date.today().isoformat(), 5)
+        upcoming_df, up_err = _cached_get_upcoming_schedule(selected_team_id, date.today().isoformat(), 20)
 
     if debug_mode and up_err:
         st.warning(f'Upcoming schedule: {up_err}')
@@ -284,7 +305,7 @@ with tab_opponents:
         for i, opp in enumerate(next_opponents[:3]):
             with opp_cols[i]:
                 with st.container(border=True):
-                    opp_name = opp.get('team_name', opp.get('opponent', ''))
+                    opp_name = opp.get('team_name', '')
                     opp_meta = get_team_meta(opp_name) or {}
                     opp_logo = opp_meta.get('logo_url', '')
                     opp_id = opp_meta.get('id', 0)
@@ -295,15 +316,35 @@ with tab_opponents:
                             st.image(opp_logo, width=60)
                     with col_info:
                         st.markdown(f"**{opp_name}**")
-                        st.caption(f"Date: {opp.get('date', 'TBD')}")
+                        # Format series date range
+                        s_start = opp.get('series_start', '')
+                        s_end = opp.get('series_end', '')
+                        fmt_start = _fmt_series_date(s_start)
+                        fmt_end = _fmt_series_date(s_end)
+                        date_range = f"{fmt_start} – {fmt_end}" if fmt_end and fmt_end != fmt_start else fmt_start
+                        st.caption(f"📅 {date_range}")
                         loc = 'Home' if opp.get('is_home') else 'Away'
-                        st.caption(f"Location: {loc}")
+                        num_games = opp.get('num_games', 1)
+                        st.caption(f"📍 {loc} · {num_games} game{'s' if num_games != 1 else ''}")
 
                     if opp_id:
                         opp_season_df, _ = _cached_build_season_df(opp_id, CURRENT_SEASON)
                         rec = get_team_last_n_record(opp_season_df, opp_name, 10)
+                        # Last game result
+                        last_game_df = build_recent_games_df(opp_season_df, opp_name, 1)
+                        if not last_game_df.empty:
+                            lg = last_game_df.iloc[0]
+                            lg_result = lg.get('Result', '')
+                            lg_runs = lg.get('Team Runs', '')
+                            lg_opp_runs = lg.get('Opp Runs', '')
+                            last_game_str = f"{lg_result} {lg_runs}–{lg_opp_runs}" if lg_result else '—'
+                        else:
+                            last_game_str = '—'
                     else:
                         rec = {'wins': 0, 'losses': 0, 'win_pct': 0.0, 'sample_size': 0, 'games_played': 0}
+                        last_game_str = '—'
+
+                    st.caption(f"🏁 Last Game: **{last_game_str}**")
 
                     w = rec.get('wins', 0)
                     l = rec.get('losses', 0)
@@ -318,7 +359,8 @@ with tab_opponents:
                         else:
                             sl = '🔴'
                         label = f"Last {sample}" if sample < 10 else "Last 10"
-                        st.metric(f"{sl} {label}", f"{w}-{l}", f"{wp:.3f}")
+                        st.markdown(f"**🎯 {label} Record**")
+                        st.metric(f"{sl} W-L", f"{w}-{l}", f"{wp:.3f}")
                     else:
                         st.info('No completed games found for this opponent yet.')
 
@@ -424,7 +466,7 @@ with tab_hr:
     with st.spinner('Loading HR data...'):
         sc_batter_df_hr, sc_bat_err_hr = _cached_get_statcast(abbr, start_sc, end_sc, 'batter')
 
-    hr_summary = get_home_run_distance_summary(sc_batter_df_hr)
+    hr_summary, hr_df = get_home_run_distance_summary(sc_batter_df_hr)
 
     col_home, col_away, col_total = st.columns(3)
     with col_home:
@@ -452,11 +494,20 @@ with tab_hr:
             st.markdown('#### ⚾ All HRs')
             n = hr_summary.get('total_hr_count', 0)
             dist = hr_summary.get('total_avg_distance', None)
+            max_h = hr_summary.get('max_height_ft', None)
+            avg_h = hr_summary.get('avg_height_ft', None)
             st.metric('Total HRs', n if n else 'N/A')
             st.metric('Avg Distance', f"{dist:.0f} ft" if dist else 'N/A')
+            st.metric('🏔️ Max Height', f"{max_h:.0f} ft" if max_h else 'N/A')
+            st.metric('Avg Height', f"{avg_h:.0f} ft" if avg_h else 'N/A')
 
     if hr_summary.get('total_hr_count', 0) == 0:
         st.info('No home run data found in the selected Statcast window. Try increasing the lookback period.')
+
+    # 3D trajectory chart
+    st.markdown('---')
+    st.markdown('#### 🚀 3D Home Run Flight Paths')
+    render_hr_3d_chart(hr_df)
 
 # ===========================================================================
 # TAB 6: Spray Chart
