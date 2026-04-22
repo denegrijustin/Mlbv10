@@ -2,7 +2,7 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import time
 
 from mlb_api import (
@@ -38,6 +38,14 @@ from formatting import coerce_float, coerce_int, format_record
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
+
+def _fmt_series_date(date_str: str) -> str:
+    """Format a YYYY-MM-DD string to 'Mon D' (e.g. 'Apr 5'), or return as-is on failure."""
+    try:
+        return datetime.strptime(date_str, '%Y-%m-%d').strftime('%b %-d')
+    except (ValueError, TypeError):
+        return date_str or 'TBD'
+
 
 st.set_page_config(page_title='MLB Analytics Dashboard', layout='wide', initial_sidebar_state='expanded')
 
@@ -311,12 +319,8 @@ with tab_opponents:
                         # Format series date range
                         s_start = opp.get('series_start', '')
                         s_end = opp.get('series_end', '')
-                        try:
-                            from datetime import datetime as _dt
-                            fmt_start = _dt.strptime(s_start, '%Y-%m-%d').strftime('%b %d').replace(' 0', ' ') if s_start else 'TBD'
-                            fmt_end = _dt.strptime(s_end, '%Y-%m-%d').strftime('%b %d').replace(' 0', ' ') if s_end else ''
-                        except ValueError:
-                            fmt_start, fmt_end = s_start, s_end
+                        fmt_start = _fmt_series_date(s_start)
+                        fmt_end = _fmt_series_date(s_end)
                         date_range = f"{fmt_start} – {fmt_end}" if fmt_end and fmt_end != fmt_start else fmt_start
                         st.caption(f"📅 {date_range}")
                         loc = 'Home' if opp.get('is_home') else 'Away'

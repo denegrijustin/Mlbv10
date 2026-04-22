@@ -9,6 +9,13 @@ import pandas as pd
 from formatting import coerce_float, coerce_int, format_record, safe_pct, signed, stoplight
 
 # ---------------------------------------------------------------------------
+# Physical constants
+# ---------------------------------------------------------------------------
+
+_MPH_TO_FPS: float = 1.46667   # miles-per-hour → feet-per-second
+_GRAVITY_FPS2: float = 32.174  # gravitational acceleration (ft/s²)
+
+# ---------------------------------------------------------------------------
 # Pitch description / event classification sets
 # ---------------------------------------------------------------------------
 
@@ -970,16 +977,15 @@ def get_home_run_distance_summary(statcast_batter_df: pd.DataFrame) -> tuple[dic
         name_col = None
 
     # Compute per-HR estimated max height using projectile physics
-    _G = 32.174  # ft/s²
     heights: list[float | None] = []
     for _, row in hrs.iterrows():
         try:
             spd = float(row[ev_col]) if ev_col else float('nan')
             ang = float(row[angle_col]) if angle_col else float('nan')
             if spd > 0 and ang > 0:  # negative/zero angles yield no vertical component
-                v0_fps = spd * 1.46667
+                v0_fps = spd * _MPH_TO_FPS
                 vz = v0_fps * math.sin(math.radians(ang))
-                h = (vz ** 2) / (2 * _G)
+                h = (vz ** 2) / (2 * _GRAVITY_FPS2)
                 heights.append(round(h, 1))
             else:
                 heights.append(None)

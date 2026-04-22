@@ -9,6 +9,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ---------------------------------------------------------------------------
+# Physical / numerical constants
+# ---------------------------------------------------------------------------
+
+_MPH_TO_FPS: float = 1.46667   # miles-per-hour → feet-per-second
+_GRAVITY_FPS2: float = 32.174  # gravitational acceleration (ft/s²)
+_COS_ZERO_EPS: float = 1e-9    # numerical tolerance for near-zero cosine check
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -669,7 +677,6 @@ def render_hr_3d_chart(hr_df: pd.DataFrame) -> None:
         st.info('No home run trajectory data available.')
         return
 
-    _G = 32.174  # ft/s²
     _N_POINTS = 50
 
     # Plasma color scale mapped to launch_speed
@@ -678,7 +685,8 @@ def render_hr_3d_chart(hr_df: pd.DataFrame) -> None:
     spd_range = (spd_max - spd_min) if spd_max != spd_min else 1.0
 
     def _plasma_hex(t: float) -> str:
-        """Map t in [0,1] to a Plasma-like hex color (purple→yellow)."""
+        # Approximate Plotly Plasma palette: t=0 → deep purple, t=1 → bright yellow
+        # R: 13→243, G: 8→188, B: 135→35
         r = int(min(255, max(0, 13 + t * 230)))
         g = int(min(255, max(0, 8 + t * 180)))
         b = int(min(255, max(0, 135 - t * 100)))
@@ -705,16 +713,16 @@ def render_hr_3d_chart(hr_df: pd.DataFrame) -> None:
         dist = float(row['hit_distance_sc'])
         name = str(row.get('player_name', 'Unknown')) if 'player_name' in row.index else 'Unknown'
 
-        v0_fps = spd * 1.46667
+        v0_fps = spd * _MPH_TO_FPS
         ang_rad = math.radians(ang)
         cos_a = math.cos(ang_rad)
         tan_a = math.tan(ang_rad)
 
         x_arr = np.linspace(0, dist, _N_POINTS)
-        if abs(cos_a) < 1e-9:
+        if abs(cos_a) < _COS_ZERO_EPS:
             z_arr = np.zeros(_N_POINTS)
         else:
-            z_arr = x_arr * tan_a - (_G * x_arr ** 2) / (2 * v0_fps ** 2 * cos_a ** 2)
+            z_arr = x_arr * tan_a - (_GRAVITY_FPS2 * x_arr ** 2) / (2 * v0_fps ** 2 * cos_a ** 2)
             z_arr = np.clip(z_arr, 0, None)
         y_arr = np.zeros(_N_POINTS)
 
