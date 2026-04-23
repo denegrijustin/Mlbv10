@@ -12,6 +12,7 @@ from mlb_api import (
     get_division_standings, get_wildcard_standings_league,
     get_upcoming_schedule, get_statcast_team_df,
     choose_live_game_pk, get_live_summary, get_wildcard_standings_combined,
+    get_current_team_game, get_live_scorecard, get_game_plays, get_game_boxscore,
 )
 from data_helpers import (
     safe_team_row, build_team_snapshot, build_summary_df, build_trend_df,
@@ -25,6 +26,10 @@ from data_helpers import (
     get_team_trend_snapshot, compare_teams,
     get_home_run_distance_summary, build_spray_chart_last_30,
     run_monte_carlo_matchup,
+    render_scorecard_html,
+    build_live_player_of_game, build_live_play_of_game,
+    load_frozen_game_state, save_frozen_game_state,
+    should_replace_frozen_state, build_frozen_snapshot,
 )
 from charts import (
     render_recent_trend_chart, render_run_diff_chart,
@@ -612,33 +617,250 @@ with tab_compare:
             render_monte_carlo_results(mc_result, team_a_meta_cmp, team_b_meta_cmp)
 
 # ===========================================================================
-# TAB 8: Live Feed
+# TAB 8: Live Feed — Full Scorecard + POTG + PLOTG
 # ===========================================================================
 
+_LIVE_REFRESH_INTERVAL = 30  # seconds
+
 with tab_live:
-    live_pk = choose_live_game_pk(daily_df)
+    # -----------------------------------------------------------------------
+    # Auto-refresh countdown
+    # -----------------------------------------------------------------------
+    refresh_placeholder = st.empty()
 
-    with st.spinner('Checking for live game data...'):
-        live_summary, live_err = get_live_summary(live_pk)
+    # -----------------------------------------------------------------------
+    # Fetch current game for the selected team
+    # -----------------------------------------------------------------------
+    with st.spinner('Fetching game data...'):
+        current_game, game_err = get_current_team_game(selected_team_id)
 
-    if live_summary:
-        st.markdown(f"### 🔴 Live: {live_summary.get('away_team', '')} at {live_summary.get('home_team', '')}")
-        live_box = build_live_box_df(live_summary)
-        st.dataframe(live_box.astype(str), use_container_width=True, hide_index=True)
-    else:
-        sched_table = build_schedule_table(daily_df, selected_team_name)
-        if not sched_table.empty:
-            st.markdown(f"**Today's Games** ({date.today().isoformat()})")
-            st.dataframe(sched_table.astype(str), use_container_width=True, hide_index=True)
+    game_phase = current_game.get('game_phase', 'none') if current_game else 'none'
+    game_pk = coerce_int(current_game.get('gamePk', 0), 0) if current_game else 0
+
+    # -----------------------------------------------------------------------
+    # Load frozen state
+    # -----------------------------------------------------------------------
+    frozen = load_frozen_game_state(selected_team_id)
+
+    # -----------------------------------------------------------------------
+    # Live/Final path: fetch full scorecard, plays, boxscore
+    # -----------------------------------------------------------------------
+    live_scorecard: dict = {}
+    plays: list = []
+    boxscore: dict = {}
+    potg: dict = {}
+    plotg: dict = {}
+    fetch_err: str = ''
+
+    if game_pk and game_phase in ('live', 'final'):
+        with st.spinner('Loading full game data...'):
+            live_scorecard, sc_err = get_live_scorecard(game_pk)
+            if sc_err:
+                fetch_err = sc_err
+            else:
+                plays, play_err = get_game_plays(game_pk)
+                boxscore, box_err = get_game_boxscore(game_pk)
+                if plays and boxscore:
+                    game_feed_raw: dict = {'gameData': {'teams': {
+                        'away': {'name': live_scorecard.get('away_team', ''), 'id': live_scorecard.get('away_id', 0)},
+                        'home': {'name': live_scorecard.get('home_team', ''), 'id': live_scorecard.get('home_id', 0)},
+                    }}}
+                    potg = build_live_player_of_game(game_feed_raw, boxscore, plays)
+                    plotg = build_live_play_of_game(game_feed_raw, plays)
+
+        # Persist / update frozen state
+        if live_scorecard and should_replace_frozen_state(frozen, current_game):
+            snap = build_frozen_snapshot(selected_team_id, current_game, live_scorecard, potg, plotg)
+            save_frozen_game_state(selected_team_id, snap)
+            frozen = snap
+
+    # -----------------------------------------------------------------------
+    # Determine what to show
+    # -----------------------------------------------------------------------
+    # For 'scheduled' phase with no live scorecard, fall back to frozen
+    show_scorecard = live_scorecard if live_scorecard else (frozen.get('scorecard') if frozen else {})
+    show_potg = potg if potg and potg.get('name', 'N/A') != 'N/A' else (frozen.get('player_of_game') if frozen else {})
+    show_plotg = plotg if plotg and plotg.get('batter', 'N/A') != 'N/A' else (frozen.get('play_of_game') if frozen else {})
+
+    # -----------------------------------------------------------------------
+    # Game header
+    # -----------------------------------------------------------------------
+    if show_scorecard:
+        away = show_scorecard.get('away_team', 'Away')
+        home = show_scorecard.get('home_team', 'Home')
+        away_r = show_scorecard.get('away_runs', 0)
+        home_r = show_scorecard.get('home_runs', 0)
+        sc_status = show_scorecard.get('status', '')
+        sc_abstract = show_scorecard.get('abstract_status', '')
+        if sc_abstract == 'Live' or 'Progress' in sc_status:
+            phase_badge = '🔴 LIVE'
+        elif sc_abstract == 'Final' or 'Final' in sc_status:
+            phase_badge = '✅ FINAL'
         else:
-            st.info('No games scheduled today or live data is unavailable.')
+            phase_badge = '🗓️ SCHEDULED'
 
-        if debug_mode and live_err:
-            st.warning(f'Live feed: {live_err}')
+        h_col1, h_col2, h_col3 = st.columns([3, 2, 3])
+        with h_col1:
+            away_logo = f"https://www.mlbstatic.com/team-logos/{show_scorecard.get('away_id', 0)}.svg"
+            st.image(away_logo, width=48)
+            st.markdown(f"**{away}**")
+        with h_col2:
+            st.markdown(f"<div style='text-align:center;font-size:2rem;font-weight:bold'>{away_r} — {home_r}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align:center;color:#aaa;font-size:0.85rem'>{phase_badge}</div>", unsafe_allow_html=True)
+        with h_col3:
+            home_logo = f"https://www.mlbstatic.com/team-logos/{show_scorecard.get('home_id', 0)}.svg"
+            st.image(home_logo, width=48)
+            st.markdown(f"**{home}**")
+    elif current_game and game_phase == 'scheduled':
+        st.markdown(f"### 🗓️ Next Game: {current_game.get('away', 'Away')} at {current_game.get('home', 'Home')}")
+        st.caption(f"Date: {current_game.get('officialDate', current_game.get('gameDate', ''))[:10]}")
+        if frozen and frozen.get('scorecard'):
+            st.info('Showing frozen state from previous game.')
+            show_scorecard = frozen.get('scorecard', {})
+    else:
+        st.info(f'No game data available for {selected_team_name}.')
+        if debug_mode and game_err:
+            st.warning(game_err)
+
+    # -----------------------------------------------------------------------
+    # Custom Scorecard
+    # -----------------------------------------------------------------------
+    if show_scorecard:
+        st.markdown('#### 📊 Inning-by-Inning Scorecard')
+        sc_html = render_scorecard_html(show_scorecard)
+        st.markdown(sc_html, unsafe_allow_html=True)
+
+        # Recent plays
+        recent = show_scorecard.get('recent_plays') or []
+        if recent:
+            with st.expander('📋 Recent Plays', expanded=(game_phase == 'live')):
+                for play_desc in reversed(recent[-8:]):
+                    st.markdown(f'- {play_desc}')
+
+        # Scoring plays (from plays list)
+        if plays:
+            scoring = [p for p in plays if p.get('is_scoring_play') and p.get('description')]
+            if scoring:
+                with st.expander('🏃 Scoring Plays', expanded=False):
+                    for sp in scoring:
+                        inn = sp.get('inning', 0)
+                        half = 'Top' if sp.get('half_inning') == 'top' else 'Bot'
+                        desc = sp.get('description', '')
+                        after_a = sp.get('away_score_after', 0)
+                        after_h = sp.get('home_score_after', 0)
+                        st.markdown(f'- **{half} {inn}** ({after_a}–{after_h}): {desc}')
+
+    # -----------------------------------------------------------------------
+    # Player of the Game
+    # -----------------------------------------------------------------------
+    if show_potg and show_potg.get('name', 'N/A') != 'N/A':
+        st.markdown('---')
+        st.markdown('#### 🏆 Player of the Game')
+        potg_col1, potg_col2 = st.columns([1, 3])
+        with potg_col1:
+            hs_url = show_potg.get('headshot_url', '')
+            if hs_url:
+                try:
+                    st.image(hs_url, width=120)
+                except Exception:
+                    pass
+        with potg_col2:
+            potg_name = show_potg.get('name', 'N/A')
+            potg_team = show_potg.get('team', '')
+            potg_role = show_potg.get('role', '')
+            potg_gis = coerce_float(show_potg.get('game_impact_score', 0), 0)
+            potg_wpa = coerce_float(show_potg.get('wpa', 0), 0)
+            potg_re24 = coerce_float(show_potg.get('re24', 0), 0)
+            potg_summary = show_potg.get('summary', '')
+            potg_stats = show_potg.get('stat_line') or {}
+
+            st.markdown(f"**{potg_name}** — {potg_team}")
+            st.caption(f"Role: {potg_role}")
+            st.markdown(f"*{potg_summary}*")
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric('Game Impact Score', f'{potg_gis:.1f}')
+            m2.metric('WPA', f'{potg_wpa:+.3f}')
+            m3.metric('RE24', f'{potg_re24:+.2f}')
+
+            if potg_stats:
+                stat_str = '&nbsp;&nbsp;'.join([f'**{k}:** {v}' for k, v in potg_stats.items()])
+                st.markdown(f'<div style="font-size:0.85rem;color:#ccc">{stat_str}</div>', unsafe_allow_html=True)
+
+    # -----------------------------------------------------------------------
+    # Play of the Game
+    # -----------------------------------------------------------------------
+    if show_plotg and show_plotg.get('batter', 'N/A') != 'N/A':
+        st.markdown('---')
+        st.markdown('#### 🎯 Play of the Game')
+
+        inning_n = show_plotg.get('inning', 0)
+        half_str = 'Top' if show_plotg.get('half_inning') == 'top' else 'Bot'
+        outs_n = show_plotg.get('outs', 0)
+        runners_list = show_plotg.get('start_runners') or []
+        runners_map = {'1B': '1st', '2B': '2nd', '3B': '3rd'}
+        runners_str = ', '.join([runners_map.get(r, r) for r in runners_list]) or 'Bases empty'
+        sc_before = show_plotg.get('score_before', '0-0')
+        sc_after = show_plotg.get('score_after', '0-0')
+        plotg_batter = show_plotg.get('batter', 'N/A')
+        plotg_pitcher = show_plotg.get('pitcher', 'N/A')
+        plotg_event = show_plotg.get('event', '')
+        plotg_desc = show_plotg.get('description', '')
+        plotg_wpa = coerce_float(show_plotg.get('wpa', 0), 0)
+        plotg_re24 = coerce_float(show_plotg.get('re24', 0), 0)
+        plotg_narrative = show_plotg.get('narrative', '')
+
+        with st.container(border=True):
+            st.markdown(f"**{half_str} {inning_n}** &nbsp;|&nbsp; {outs_n} out(s) &nbsp;|&nbsp; {runners_str}")
+            st.markdown(f"**{plotg_batter}** vs {plotg_pitcher}")
+            st.markdown(f"**{plotg_event}**")
+            if plotg_desc:
+                st.markdown(f"*{plotg_desc}*")
+            st.markdown(f"Score: {sc_before} → **{sc_after}**")
+
+            st.markdown(f'<div style="font-size:0.8rem;color:#aaa;margin-top:8px">Why this was the Play of the Game:<br>'
+                        f'WPA swing: {plotg_wpa:+.3f} &nbsp;|&nbsp; RE24 swing: {plotg_re24:+.2f}</div>',
+                        unsafe_allow_html=True)
+
+        # Runner-ups
+        runner_ups = show_plotg.get('runner_ups') or []
+        if runner_ups:
+            with st.expander('Runner-up Plays', expanded=False):
+                for i, ru in enumerate(runner_ups[:2], start=2):
+                    tier = 'Second' if i == 2 else 'Third'
+                    ru_inn = ru.get('inning', 0)
+                    ru_half = 'Top' if ru.get('half_inning') == 'top' else 'Bot'
+                    ru_event = ru.get('event', '')
+                    ru_batter = ru.get('batter', '')
+                    ru_wpa = coerce_float(ru.get('wpa', 0), 0)
+                    ru_re24 = coerce_float(ru.get('re24', 0), 0)
+                    st.markdown(f"**{tier} tier** — {ru_half} {ru_inn}: {ru_batter} — {ru_event}")
+                    st.caption(f"WPA: {ru_wpa:+.3f} | RE24: {ru_re24:+.2f}")
+
+    # -----------------------------------------------------------------------
+    # Debug / error info
+    # -----------------------------------------------------------------------
+    if debug_mode:
+        if fetch_err:
+            st.warning(f'Scorecard fetch error: {fetch_err}')
+        if game_err:
+            st.warning(f'Game lookup error: {game_err}')
+        if frozen:
+            st.caption(f"Frozen state: gamePk={frozen.get('gamePk')} | frozen_at={frozen.get('frozen_at', '')[:19]}")
+
+    # -----------------------------------------------------------------------
+    # Auto-refresh for live games
+    # -----------------------------------------------------------------------
+    if game_phase == 'live':
+        refresh_placeholder.caption(f'⟳ Auto-refreshing every {_LIVE_REFRESH_INTERVAL}s — Next refresh in {_LIVE_REFRESH_INTERVAL}s')
+        time.sleep(_LIVE_REFRESH_INTERVAL)
+        st.rerun()
+    else:
+        refresh_placeholder.caption('📡 Live Feed · Updates automatically during active games.')
 
 # ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
 
 st.divider()
-st.caption(f'MLB Analytics Dashboard v25 · Season {CURRENT_SEASON} · Data from MLB Stats API & Baseball Savant')
+st.caption(f'MLB Analytics Dashboard v27 · Season {CURRENT_SEASON} · Data from MLB Stats API & Baseball Savant')
